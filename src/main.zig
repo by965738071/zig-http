@@ -1,0 +1,66 @@
+const std = @import("std");
+const httpServer = @import("http_server.zig").HTTPServer;
+const router = @import("router.zig").Router;
+const http = std.http;
+const Context = @import("context.zig").Context;
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+    var threaded = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    std.log.info("Zig HTTP Server", .{});
+    std.log.info("Note: This is a demo. The full HTTP framework requires Zig 0.15+ stable APIs.", .{});
+    std.log.info("See src/http_server.zig, src/router.zig, etc. for the framework implementation.", .{});
+    std.log.info("\nFramework components implemented:", .{});
+    std.log.info("  - HTTPServer: src/http_server.zig", .{});
+    std.log.info("  - Router: src/router.zig (Trie tree routing)", .{});
+    std.log.info("  - Middleware: src/middleware.zig", .{});
+    std.log.info("  - Context: src/context.zig", .{});
+    std.log.info("  - Response: src/response.zig", .{});
+    std.log.info("\nBuilt-in Middlewares:", .{});
+    std.log.info("  - LoggingMiddleware: src/middleware/logging.zig", .{});
+    std.log.info("  - CORSMiddleware: src/middleware/cors.zig", .{});
+    std.log.info("  - AuthMiddleware: src/middleware/auth.zig", .{});
+    std.log.info("\nTo use the framework once APIs stabilize:", .{});
+    std.log.info("  See README.md for detailed API documentation.", .{});
+
+    var route = try router.init(allocator);
+
+    route.addRoute(http.Method.GET, "/abc", handlerHello) catch |err| {
+        std.log.err("Failed to add route: {}", .{err});
+        return err;
+    };
+
+    route.addRoute(http.Method.GET, "/abc/bcd", handlerBcd) catch |err| {
+        std.log.err("Failed to add route: {}", .{err});
+        return err;
+    };
+
+    var server = try httpServer.init(allocator, .{
+        .port = 8080,
+        .host = "127.0.0.1",
+    });
+
+    server.setRouter(route);
+    server.start(io) catch |err| {
+        std.log.err("Error starting server: {}", .{err});
+        return err;
+    };
+    defer server.deinit();
+}
+
+fn handlerHello(ctx: *Context) !void {
+    ctx.response.setStatus(http.Status.ok);
+    try ctx.response.setHeader("Content-Type", "application/json");
+    try ctx.response.writeJSON("Hello, World!");
+}
+
+fn handlerBcd(ctx: *Context) !void {
+    ctx.response.setStatus(http.Status.ok);
+    try ctx.response.setHeader("Content-Type", "application/json");
+    try ctx.response.writeJSON("Hello from /abc/bcd!");
+}
