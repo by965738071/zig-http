@@ -1,6 +1,8 @@
 
 # Zig
-zig-cache/
+.zig-cache/*
 zig-out/
 simple_main
 zig-out/*
+/zig-out/
+/.zig-cache
