@@ -6,3 +6,4 @@ simple_main
 zig-out/*
 /zig-out/
 /.zig-cache
+.DS_Store
