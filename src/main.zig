@@ -12,6 +12,7 @@ pub fn main() !void {
     defer threaded.deinit();
     const io = threaded.io();
 
+    std.log.info("Hello, World!", .{});
     std.log.info("Zig HTTP Server", .{});
     std.log.info("Note: This is a demo. The full HTTP framework requires Zig 0.15+ stable APIs.", .{});
     std.log.info("See src/http_server.zig, src/router.zig, etc. for the framework implementation.", .{});
