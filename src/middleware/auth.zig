@@ -5,18 +5,33 @@ const Context = @import("../context.zig").Context;
 
 pub const AuthMiddleware = struct {
     middleware: Middleware,
+    allocator: std.mem.Allocator,
     secret: []const u8,
+    whitelist: std.ArrayList([]const u8),
 
     pub fn init(allocator: std.mem.Allocator, secret: []const u8) !*AuthMiddleware {
         const self = try allocator.create(AuthMiddleware);
         self.* = .{
             .middleware = Middleware.init(AuthMiddleware, self),
+            .allocator = allocator,
             .secret = try allocator.dupe(u8, secret),
+            .whitelist = std.ArrayList([]const u8){},
         };
         return self;
     }
 
+    pub fn skipPath(self: *AuthMiddleware, path: []const u8) !void {
+        try self.whitelist.append(self.allocator, try self.allocator.dupe(u8, path));
+    }
+
     pub fn process(self: *AuthMiddleware, ctx: *Context) !Middleware.NextAction {
+        // Check whitelist
+        for (self.whitelist.items) |path| {
+            if (std.mem.startsWith(u8, ctx.request.head.target, path)) {
+                return Middleware.NextAction.@"continue";
+            }
+        }
+
         const auth_header = ctx.getHeader("Authorization") orelse {
             try ctx.err(http.Status.unauthorized, "Missing Authorization header");
             return Middleware.NextAction.respond;
@@ -40,7 +55,10 @@ pub const AuthMiddleware = struct {
     }
 
     pub fn deinit(self: *AuthMiddleware) void {
-        _ = self;
-        // Note: We don't free secret here as it may be owned by the allocator
+        self.allocator.free(self.secret);
+        for (self.whitelist.items) |path| {
+            self.allocator.free(path);
+        }
+        self.whitelist.deinit(self.allocator);
     }
 };

@@ -3,6 +3,7 @@ const httpServer = @import("http_server.zig").HTTPServer;
 const router = @import("router.zig").Router;
 const http = std.http;
 const Context = @import("context.zig").Context;
+const AuthMiddleware = @import("middleware/auth.zig").AuthMiddleware;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -30,21 +31,23 @@ pub fn main() !void {
     std.log.info("  See README.md for detailed API documentation.", .{});
 
     var route = try router.init(allocator);
+    defer route.deinit();
 
-    route.addRoute(http.Method.GET, "/abc", handlerHello) catch |err| {
-        std.log.err("Failed to add route: {}", .{err});
-        return err;
-    };
+    try route.addRoute(http.Method.GET, "/abc", handlerHello);
 
-    route.addRoute(http.Method.GET, "/abc/bcd", handlerBcd) catch |err| {
-        std.log.err("Failed to add route: {}", .{err});
-        return err;
-    };
+    try route.addRoute(http.Method.GET, "/abc/bcd", handlerBcd);
 
     var server = try httpServer.init(allocator, .{
         .port = 8080,
         .host = "127.0.0.1",
     });
+
+    // 创建并添加 AuthMiddleware
+    var auth_middleware = try AuthMiddleware.init(allocator, "my-secret-token");
+    defer auth_middleware.deinit();
+    // 添加跳过认证的路径白名单
+    try auth_middleware.skipPath("/abc");
+    server.use(&auth_middleware.middleware);
 
     server.setRouter(route);
     server.start(io) catch |err| {

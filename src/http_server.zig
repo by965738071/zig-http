@@ -44,7 +44,7 @@ pub const HTTPServer = struct {
 
     pub fn use(server: *HTTPServer, middleware: *Middleware) void {
         // 修复: append 不再需要 allocator 参数
-        server.middlewares.append(middleware) catch |err| {
+        server.middlewares.append(server.allocator,middleware) catch |err| {
             std.log.err("Failed to add middleware: {}", .{err});
         };
     }
