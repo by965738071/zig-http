@@ -18,8 +18,7 @@ pub const Middleware = struct {
         err,     // Error handling
     };
 
-    pub fn init(comptime T: type, middleware: *T) Middleware {
-        _ = middleware;
+    pub fn init(comptime T: type) Middleware {
         return .{
             .name = @typeName(T),
             .vtable = &.{

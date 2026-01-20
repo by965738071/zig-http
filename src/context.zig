@@ -58,9 +58,10 @@ pub const Context = struct {
     }
 
     pub fn setState(ctx: *Context, key: []const u8, value: anytype) !void {
-        const ptr = try ctx.server.allocator.create(@TypeOf(value));
+        const T = @TypeOf(value);
+        const ptr = try ctx.server.allocator.create(T);
         ptr.* = value;
-        try ctx.state.put(key, ptr);
+        try ctx.state.put(key, @ptrCast(ptr));
     }
 
     pub fn getState(ctx: Context, key: []const u8) ?*anyopaque {

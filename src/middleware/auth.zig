@@ -12,7 +12,7 @@ pub const AuthMiddleware = struct {
     pub fn init(allocator: std.mem.Allocator, secret: []const u8) !*AuthMiddleware {
         const self = try allocator.create(AuthMiddleware);
         self.* = .{
-            .middleware = Middleware.init(AuthMiddleware, self),
+            .middleware = Middleware.init(AuthMiddleware),
             .allocator = allocator,
             .secret = try allocator.dupe(u8, secret),
             .whitelist = std.ArrayList([]const u8){},
@@ -21,7 +21,7 @@ pub const AuthMiddleware = struct {
     }
 
     pub fn skipPath(self: *AuthMiddleware, path: []const u8) !void {
-        try self.whitelist.append(self.allocator, try self.allocator.dupe(u8, path));
+        try self.whitelist.append(self.allocator,try self.allocator.dupe(u8, path));
     }
 
     pub fn process(self: *AuthMiddleware, ctx: *Context) !Middleware.NextAction {

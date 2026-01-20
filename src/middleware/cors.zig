@@ -4,6 +4,7 @@ const Context = @import("../context.zig").Context;
 
 pub const CORSMiddleware = struct {
     middleware: Middleware,
+    allocator: std.mem.Allocator,
     allowed_origins: []const []const u8,
     allow_credentials: bool,
     allowed_methods: []const []const u8,
@@ -19,7 +20,8 @@ pub const CORSMiddleware = struct {
     pub fn init(allocator: std.mem.Allocator, options: Options) !*CORSMiddleware {
         const self = try allocator.create(CORSMiddleware);
         self.* = .{
-            .middleware = Middleware.init(CORSMiddleware, self),
+            .middleware = Middleware.init(CORSMiddleware),
+            .allocator = allocator,
             .allowed_origins = try allocator.dupe([]const u8, options.allowed_origins),
             .allow_credentials = options.allow_credentials,
             .allowed_methods = try allocator.dupe([]const u8, options.allowed_methods),
@@ -73,7 +75,8 @@ pub const CORSMiddleware = struct {
     }
 
     pub fn deinit(self: *CORSMiddleware) void {
-        _ = self;
-        // Note: We don't free the slices here as they may be owned by the allocator
+        self.allocator.free(self.allowed_origins);
+        self.allocator.free(self.allowed_methods);
+        self.allocator.free(self.allowed_headers);
     }
 };

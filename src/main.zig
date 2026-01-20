@@ -4,6 +4,8 @@ const router = @import("router.zig").Router;
 const http = std.http;
 const Context = @import("context.zig").Context;
 const AuthMiddleware = @import("middleware/auth.zig").AuthMiddleware;
+const XSSMiddleware = @import("middleware/xss.zig").XSSMiddleware;
+const CSRFMiddleware = @import("middleware/csrf.zig").CSRFMiddleware;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -27,6 +29,8 @@ pub fn main() !void {
     std.log.info("  - LoggingMiddleware: src/middleware/logging.zig", .{});
     std.log.info("  - CORSMiddleware: src/middleware/cors.zig", .{});
     std.log.info("  - AuthMiddleware: src/middleware/auth.zig", .{});
+    std.log.info("  - XSSMiddleware: src/middleware/xss.zig", .{});
+    std.log.info("  - CSRFMiddleware: src/middleware/csrf.zig", .{});
     std.log.info("\nTo use the framework once APIs stabilize:", .{});
     std.log.info("  See README.md for detailed API documentation.", .{});
 
@@ -41,6 +45,18 @@ pub fn main() !void {
         .port = 8080,
         .host = "127.0.0.1",
     });
+
+    // 创建并添加安全中间件
+    var xss_middleware = try XSSMiddleware.init(allocator, true);
+    defer xss_middleware.deinit();
+    server.use(&xss_middleware.middleware);
+
+    var csrf_middleware = try CSRFMiddleware.init(allocator, .{
+        .secret = "csrf-secret-key-change-in-production",
+        .token_lifetime_sec = 3600,
+    });
+    defer csrf_middleware.deinit();
+    server.use(&csrf_middleware.middleware);
 
     // 创建并添加 AuthMiddleware
     var auth_middleware = try AuthMiddleware.init(allocator, "my-secret-token");

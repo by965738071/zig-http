@@ -8,7 +8,7 @@ pub const LoggingMiddleware = struct {
     pub fn init(allocator: std.mem.Allocator) !*LoggingMiddleware {
         const self = try allocator.create(LoggingMiddleware);
         self.* = .{
-            .middleware = Middleware.init(LoggingMiddleware, self),
+            .middleware = Middleware.init(LoggingMiddleware),
         };
         return self;
     }
