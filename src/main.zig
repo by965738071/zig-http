@@ -15,24 +15,10 @@ pub fn main() !void {
     defer threaded.deinit();
     const io = threaded.io();
 
-    std.log.info("Hello, World!", .{});
-    std.log.info("Zig HTTP Server", .{});
-    std.log.info("Note: This is a demo. The full HTTP framework requires Zig 0.15+ stable APIs.", .{});
-    std.log.info("See src/http_server.zig, src/router.zig, etc. for the framework implementation.", .{});
-    std.log.info("\nFramework components implemented:", .{});
-    std.log.info("  - HTTPServer: src/http_server.zig", .{});
-    std.log.info("  - Router: src/router.zig (Trie tree routing)", .{});
-    std.log.info("  - Middleware: src/middleware.zig", .{});
-    std.log.info("  - Context: src/context.zig", .{});
-    std.log.info("  - Response: src/response.zig", .{});
-    std.log.info("\nBuilt-in Middlewares:", .{});
-    std.log.info("  - LoggingMiddleware: src/middleware/logging.zig", .{});
-    std.log.info("  - CORSMiddleware: src/middleware/cors.zig", .{});
-    std.log.info("  - AuthMiddleware: src/middleware/auth.zig", .{});
-    std.log.info("  - XSSMiddleware: src/middleware/xss.zig", .{});
-    std.log.info("  - CSRFMiddleware: src/middleware/csrf.zig", .{});
-    std.log.info("\nTo use the framework once APIs stabilize:", .{});
-    std.log.info("  See README.md for detailed API documentation.", .{});
+    std.log.info("Zig HTTP Server starting on {s}:{d}", .{ "127.0.0.1", 8080 });
+    std.log.info("Components: HTTPServer, Router, Middleware, Context, Response", .{});
+    std.log.info("Middlewares: XSS, CSRF, Auth", .{});
+    std.log.info("Press Ctrl+C to stop the server", .{});
 
     var route = try router.init(allocator);
     defer route.deinit();

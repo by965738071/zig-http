@@ -116,8 +116,11 @@ pub const HTTPServer = struct {
         const address = try std.Io.net.IpAddress.parseLiteral(host_str);
 
         // 修复 2: listen 是静态函数,需要传入 io
-
-        server.tcp_server = try address.listen(server.io, .{ .reuse_address = true });
+        // 增加 kernel_backlog 队列长度,支持更多并发连接
+        server.tcp_server = try address.listen(server.io, .{
+            .reuse_address = true,
+            .kernel_backlog = 4096,  // 增加到 4096
+        });
 
         std.log.info("Server listening on {s}:{}\n", .{ server.config.host, server.config.port });
 
@@ -155,15 +158,21 @@ fn handleConnection(server: *HTTPServer, stream: Io.net.Stream) void {
         var request = http_server_struct.receiveHead() catch |err| {
             // Normal connection close conditions
             if (err == error.EndOfStream or err == error.HttpConnectionClosing) break;
+            // ReadFailed 在压测时常见:客户端提前关闭连接、网络错误等
+            if (err == error.ReadFailed) {
+                std.log.debug("Connection read failed (client may have closed connection): {}", .{err});
+                break;
+            }
             std.log.err("Request failed: {}", .{err});
             break;
         };
 
-        std.log.info("Received: {s} {s}", .{ @tagName(request.head.method), request.head.target });
+        // 请求日志改为 debug 级别,避免压测时影响性能
+        std.log.debug("Received: {s} {s}", .{ @tagName(request.head.method), request.head.target });
 
         // Handle request - 传递 writer 引用
         if (handleRequest(server, &request, &writer)) |_| {
-            std.log.info("Response sent", .{});
+            // std.log.info("Response sent", .{});  // 压测时注释掉
         } else |err| {
             std.log.err("Error handling request: {}", .{err});
         }
