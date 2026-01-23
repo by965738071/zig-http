@@ -17,7 +17,8 @@ pub const LoggingMiddleware = struct {
         _ = self;
         const start = std.time.Instant.now() catch unreachable;
         defer {
-            const elapsed = start.elapsed() catch unreachable;
+            const end = std.time.Instant.now() catch unreachable;
+            const elapsed = end.since(start);
             std.log.info("{s} {s} - {d}μs", .{
                 @tagName(ctx.request.head.method),
                 ctx.request.head.target,

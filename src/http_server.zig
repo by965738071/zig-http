@@ -17,6 +17,9 @@ pub const HTTPServer = struct {
     middlewares: std.ArrayList(*Middleware),
     config: Config,
     running: bool,
+    ws_server: ?*WebSocketServer = null,
+
+    const WebSocketServer = @import("websocket.zig").WebSocketServer;
 
     pub fn init(allocator: std.mem.Allocator, config: Config) !HTTPServer {
         return .{
@@ -27,7 +30,12 @@ pub const HTTPServer = struct {
             .middlewares = .{},
             .config = config,
             .running = false,
+            .ws_server = null,
         };
+    }
+
+    pub fn setWebSocketServer(server: *HTTPServer, ws_server: *WebSocketServer) void {
+        server.ws_server = ws_server;
     }
 
     pub fn setRouter(server: *HTTPServer, router: Router) void {
@@ -44,7 +52,7 @@ pub const HTTPServer = struct {
 
     pub fn use(server: *HTTPServer, middleware: *Middleware) void {
         // 修复: append 不再需要 allocator 参数
-        server.middlewares.append(server.allocator,middleware) catch |err| {
+        server.middlewares.append(server.allocator, middleware) catch |err| {
             std.log.err("Failed to add middleware: {}", .{err});
         };
     }
@@ -119,7 +127,7 @@ pub const HTTPServer = struct {
         // 增加 kernel_backlog 队列长度,支持更多并发连接
         server.tcp_server = try address.listen(server.io, .{
             .reuse_address = true,
-            .kernel_backlog = 4096,  // 增加到 4096
+            .kernel_backlog = 4096, // 增加到 4096
         });
 
         std.log.info("Server listening on {s}:{}\n", .{ server.config.host, server.config.port });
@@ -169,6 +177,60 @@ fn handleConnection(server: *HTTPServer, stream: Io.net.Stream) void {
 
         // 请求日志改为 debug 级别,避免压测时影响性能
         std.log.debug("Received: {s} {s}", .{ @tagName(request.head.method), request.head.target });
+
+        // Check for WebSocket upgrade before handling regular request
+        if (server.ws_server) |ws_server| {
+            const upgrade = request.upgradeRequested();
+            if (upgrade != .none) {
+                // Check if this path has a WebSocket handler
+                if (ws_server.hasHandler(request.head.target)) {
+                    const handler = ws_server.getHandler(request.head.target).?;
+                    const sec_websocket_key = switch (upgrade) {
+                        .websocket => |key| key orelse {
+                            std.log.err("WebSocket upgrade missing Sec-WebSocket-Key header", .{});
+                            break;
+                        },
+                        else => {
+                            std.log.err("Invalid WebSocket upgrade request", .{});
+                            break;
+                        },
+                    };
+
+                    // Perform WebSocket upgrade
+                    const ws = request.respondWebSocket(.{ .key = sec_websocket_key }) catch |err| {
+                        std.log.err("WebSocket upgrade failed: {}", .{err});
+                        break;
+                    };
+
+                    // Create WebSocket context and run handler
+                    const WebSocketContext = @import("websocket.zig").WebSocketContext;
+
+                    // Allocate buffers for WebSocket
+                    const ws_read_buffer = server.allocator.alloc(u8, 8192) catch |err| {
+                        std.log.err("Failed to allocate WebSocket read buffer: {}", .{err});
+                        break;
+                    };
+                    defer server.allocator.free(ws_read_buffer);
+
+                    var context = WebSocketContext{
+                        .allocator = server.allocator,
+                        .io = io,
+                        .stream = stream,
+                        .ws = ws,
+                        .read_buffer = ws_read_buffer,
+                    };
+
+                    // Run WebSocket handler
+                    handler(&context) catch |err| {
+                        std.log.err("WebSocket handler error: {}", .{err});
+                        context.close();
+                    };
+
+                    // WebSocket handler finished, close connection
+                    return;
+                }
+            }
+        }
 
         // Handle request - 传递 writer 引用
         if (handleRequest(server, &request, &writer)) |_| {
