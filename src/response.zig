@@ -6,12 +6,14 @@ pub const Response = struct {
     status: http.Status = .ok,
     headers: std.ArrayList(http.Header),
     body: std.ArrayList(u8),
+    writer: ?*std.Io.Writer = null,
 
     pub fn init(allocator: std.mem.Allocator) !Response {
         return .{
             .allocator = allocator,
             .headers = std.ArrayList(http.Header){},
             .body = std.ArrayList(u8){},
+            .writer = null,
         };
     }
 
@@ -49,6 +51,37 @@ pub const Response = struct {
             res.allocator,
             .{ .name = name, .value = value },
         );
+    }
+
+    pub fn addHeader(res: *Response, name: []const u8, value: []const u8) !void {
+        try res.setHeader(name, value);
+    }
+
+    pub fn writeAll(res: *Response, data: []const u8) !void {
+        try res.write(data);
+    }
+
+    pub fn flush(res: *Response) !void {
+        if (res.writer) |w| {
+            try w.flush();
+        }
+    }
+
+    pub fn clearRetainingCapacity(res: *Response) void {
+        res.body.clearRetainingCapacity();
+    }
+
+    pub fn appendSlice(res: *Response, data: []const u8) !void {
+        try res.body.appendSlice(res.allocator, data);
+    }
+
+    pub fn getHeader(res: *Response, name: []const u8) ?[]const u8 {
+        for (res.headers.items) |header| {
+            if (std.ascii.eqlIgnoreCase(header.name, name)) {
+                return header.value;
+            }
+        }
+        return null;
     }
 
     pub fn toHttpResponse(res: *Response, writer: anytype, request: *http.Server.Request) !void {

@@ -8,6 +8,11 @@ const Context = @import("context.zig").Context;
 const Response = @import("response.zig").Response;
 const Config = @import("types.zig").Config;
 const Handler = @import("types.zig").Handler;
+const StaticServer = @import("static_server.zig").StaticServer;
+const RateLimiter = @import("rate_limiter.zig").RateLimiter;
+const Metrics = @import("monitoring.zig").Metrics;
+const ErrorHandler = @import("error_handler.zig").ErrorHandler;
+const Logger = @import("error_handler.zig").Logger;
 
 pub const HTTPServer = struct {
     allocator: std.mem.Allocator,
@@ -18,24 +23,53 @@ pub const HTTPServer = struct {
     config: Config,
     running: bool,
     ws_server: ?*WebSocketServer = null,
+    static_server: ?*StaticServer = null,
+    rate_limiter: ?*RateLimiter = null,
+    metrics: ?*Metrics = null,
+    error_handler: ?*ErrorHandler = null,
+    logger: ?*Logger = null,
 
     const WebSocketServer = @import("websocket.zig").WebSocketServer;
 
     pub fn init(allocator: std.mem.Allocator, config: Config) !HTTPServer {
         return .{
             .allocator = allocator,
-            .io = undefined, // Will be set when Io is available
-            .tcp_server = undefined, // Will be set when listening
+            .io = undefined,
+            .tcp_server = undefined,
             .router = try Router.init(allocator),
             .middlewares = .{},
             .config = config,
             .running = false,
             .ws_server = null,
+            .rate_limiter = null,
+            .metrics = null,
+            .error_handler = null,
+            .logger = null,
         };
     }
 
     pub fn setWebSocketServer(server: *HTTPServer, ws_server: *WebSocketServer) void {
         server.ws_server = ws_server;
+    }
+
+    pub fn setStaticServer(server: *HTTPServer, static_server: *StaticServer) void {
+        server.static_server = static_server;
+    }
+
+    pub fn setRateLimiter(server: *HTTPServer, limiter: *RateLimiter) void {
+        server.rate_limiter = limiter;
+    }
+
+    pub fn setMetrics(server: *HTTPServer, metrics: *Metrics) void {
+        server.metrics = metrics;
+    }
+
+    pub fn setErrorHandler(server: *HTTPServer, handler: *ErrorHandler) void {
+        server.error_handler = handler;
+    }
+
+    pub fn setLogger(server: *HTTPServer, logger: *Logger) void {
+        server.logger = logger;
     }
 
     pub fn setRouter(server: *HTTPServer, router: Router) void {
@@ -161,6 +195,12 @@ fn handleConnection(server: *HTTPServer, stream: Io.net.Stream) void {
     var writer = stream.writer(io, &write_buffer);
     var http_server_struct = http.Server.init(&reader.interface, &writer.interface);
 
+    // Set connection timeout
+    if (server.config.request_timeout > 0) {
+        const timeout_ms = server.config.request_timeout;
+        _ = timeout_ms; // TODO: Apply timeout to stream when Zig std lib supports it
+    }
+
     // Keep-Alive loop
     while (true) {
         var request = http_server_struct.receiveHead() catch |err| {
@@ -247,10 +287,10 @@ fn handleRequest(server: *HTTPServer, request: *http.Server.Request, writer: any
     var response = try Response.init(server.allocator);
     defer response.deinit();
 
-    var context = try Context.init(server.allocator, server, request, &response);
+    var context = try Context.init(server.allocator, server, request, &response, server.io);
     defer context.deinit();
 
-    // Find route
+    // Find route or check for static files
     const route = server.router.findRoute(request.head.method, request.head.target) catch |err| {
         std.log.err("Error finding route: {}", .{err});
         context.setStatus(http.Status.internal_server_error);
@@ -258,6 +298,21 @@ fn handleRequest(server: *HTTPServer, request: *http.Server.Request, writer: any
         try response.toHttpResponse(writer, request);
         return true;
     } orelse {
+        // Check if static file server is configured
+        if (server.static_server) |static_srv| {
+            if (request.head.method == http.Method.GET and
+                static_srv.handle(&context) catch |err| {
+                    std.log.err("Static file error: {}", .{err});
+                    context.setStatus(http.Status.internal_server_error);
+                    try context.json(.{ .error_val = "Internal server error" });
+                    try response.toHttpResponse(writer, request);
+                    return true;
+                })
+            {
+                return true; // Static file served, skip route handler
+            }
+        }
+
         context.setStatus(http.Status.not_found);
         try context.json(.{ .error_val = "Not found" });
         try response.toHttpResponse(writer, request);
