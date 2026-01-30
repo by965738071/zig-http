@@ -20,16 +20,17 @@ pub const ServerConfig = struct {
 
 /// Configuration loader
 pub const ConfigLoader = struct {
+    io: std.Io,
     allocator: std.mem.Allocator,
     env_vars: std.StringHashMap([]const u8),
     loaded_config: std.json.Value,
 
-    pub fn init(allocator: std.mem.Allocator) ConfigLoader {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) ConfigLoader {
         // Load environment variables
         var env_vars = std.StringHashMap([]const u8).init(allocator);
 
         // Iterate through environment
-        var env = std.process.EnvMap.init(allocator);
+        var env = std.process.Environ.Map.init(allocator);
         defer env.deinit();
 
         var it = env.iterator();
@@ -41,6 +42,7 @@ pub const ConfigLoader = struct {
 
         return .{
             .allocator = allocator,
+            .io = io,
             .env_vars = env_vars,
             .loaded_config = .null,
         };
@@ -61,10 +63,13 @@ pub const ConfigLoader = struct {
 
     /// Load configuration from file
     pub fn loadFromFile(loader: *ConfigLoader, path: []const u8) !ServerConfig {
-        const file = try std.fs.cwd().openFile(path, .{});
-        defer file.close();
+        const file = try std.Io.Dir.openFile(std.Io.Dir.cwd(), loader.io, path, .{});
 
-        const content = try file.readToEndAlloc(loader.allocator, 10 * 1024 * 1024); // Max 10MB
+        //const file = try std.fs.cwd().openFile(path, .{});
+        defer file.close(loader.io);
+        var file_buf: [10 * 1024 * 1024]u8 = undefined;
+        var reader = file.reader(loader.io, &file_buf).interface;
+        const content = try reader.readAlloc(loader.allocator, 10 * 1024 * 1024); // Max 10MB
         defer loader.allocator.free(content);
 
         // Parse JSON
@@ -101,6 +106,7 @@ pub const ConfigLoader = struct {
 
     /// Parse configuration from JSON
     fn parseFromJson(loader: *ConfigLoader, json: std.json.Value) ServerConfig {
+        _ = loader;
         var config = ServerConfig{};
 
         if (json != .object) return config;
@@ -153,10 +159,11 @@ pub const ConfigLoader = struct {
 
     /// Save configuration to file
     pub fn saveToFile(loader: *ConfigLoader, config: ServerConfig, path: []const u8) !void {
-        const file = try std.fs.cwd().createFile(path, .{});
-        defer file.close();
+        const file = try std.Io.Dir.createFile(std.Io.Dir.cwd(), loader.io, path, .{});
+        defer file.close(loader.io);
 
-        const writer = file.writer();
+        var file_buf: [10 * 1024 * 1024]u8 = undefined;
+        const writer = &file.writer(loader.io, &file_buf).interface;
 
         // Write JSON config
         try writer.print(
@@ -173,21 +180,19 @@ pub const ConfigLoader = struct {
             \\  "rate_limit_max": {d},
             \\  "rate_limit_window": {d}
             \\}}
-        ,
-            .{
-                config.host,
-                config.port,
-                config.max_connections,
-                config.request_timeout_ms,
-                config.static_root,
-                config.static_prefix,
-                config.enable_logging,
-                config.log_level,
-                config.enable_rate_limit,
-                config.rate_limit_max,
-                config.rate_limit_window,
-            }
-        );
+        , .{
+            config.host,
+            config.port,
+            config.max_connections,
+            config.request_timeout_ms,
+            config.static_root,
+            config.static_prefix,
+            config.enable_logging,
+            config.log_level,
+            config.enable_rate_limit,
+            config.rate_limit_max,
+            config.rate_limit_window,
+        });
     }
 };
 

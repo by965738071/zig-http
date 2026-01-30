@@ -28,7 +28,7 @@ pub const StreamingWriter = struct {
         allocator: std.mem.Allocator,
         io: Io,
         stream: Io.net.Stream,
-        writer: anytype,
+        writer: std.Io.Writer,
         config: StreamingConfig,
     ) StreamingWriter {
         return .{
@@ -124,6 +124,7 @@ pub const StreamingMiddleware = struct {
     }
 
     pub fn toMiddleware(self: *StreamingMiddleware) Middleware {
+        _ = self;
         return Middleware.init(StreamingMiddleware);
     }
 
@@ -136,30 +137,30 @@ pub const StreamingMiddleware = struct {
 
 /// Helper to send streaming response headers
 pub fn sendStreamingHeaders(
-    writer: anytype,
+    writer: *std.Io.Writer,
     stream_type: StreamingType,
     request: *http.Server.Request,
 ) !void {
-    const w = &writer.interface;
+    //const w = writer;
 
     // Status line
-    try w.print("HTTP/1.1 200 OK\r\n");
+    try writer.print("HTTP/1.1 200 OK\r\n");
 
     switch (stream_type) {
         .chunked => {
-            try w.writeAll("Transfer-Encoding: chunked\r\n");
-            try w.print("Content-Type: text/plain\r\n");
+            try writer.writeAll("Transfer-Encoding: chunked\r\n");
+            try writer.print("Content-Type: text/plain\r\n");
         },
         .sse => {
-            try w.writeAll("Content-Type: text/event-stream\r\n");
-            try w.writeAll("Cache-Control: no-cache\r\n");
-            try w.writeAll("Connection: keep-alive\r\n");
-            try w.writeAll("X-Accel-Buffering: no\r\n"); // Disable nginx buffering
+            try writer.writeAll("Content-Type: text/event-stream\r\n");
+            try writer.writeAll("Cache-Control: no-cache\r\n");
+            try writer.writeAll("Connection: keep-alive\r\n");
+            try writer.writeAll("X-Accel-Buffering: no\r\n"); // Disable nginx buffering
         },
     }
 
-    try w.print("connection: {s}\r\n", .{if (request.head.keep_alive) "keep-alive" else "close"});
-    try w.writeAll("\r\n");
+    try writer.print("connection: {s}\r\n", .{if (request.head.keep_alive) "keep-alive" else "close"});
+    try writer.writeAll("\r\n");
 
-    try w.flush();
+    try writer.flush();
 }

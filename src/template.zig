@@ -15,10 +15,15 @@ pub const Template = struct {
     }
 
     pub fn deinit(template_obj: *Template) void {
+        // Must manually free all allocated strings before deinit()
+        // because HashMap only stores pointers, doesn't own the memory
         var it = template_obj.variables.iterator();
         while (it.next()) |entry| {
-            template_obj.allocator.free(entry.key_ptr.*);
-            template_obj.allocator.free(entry.value_ptr.*);
+            // Safe way: copy pointers first, then free
+            const key = entry.key_ptr.*;
+            const value = entry.value_ptr.*;
+            template_obj.allocator.free(key);
+            template_obj.allocator.free(value);
         }
         template_obj.variables.deinit();
     }
