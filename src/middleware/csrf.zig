@@ -39,7 +39,8 @@ pub const CSRFMiddleware = struct {
         return self;
     }
 
-    pub fn process(self: *CSRFMiddleware, ctx: *Context) !Middleware.NextAction {
+    pub fn process(self: *CSRFMiddleware, ctx: *Context, io: std.Io) !Middleware.NextAction {
+        _ = io;
         if (!self.enabled) {
             return Middleware.NextAction.@"continue";
         }

@@ -21,10 +21,11 @@ pub const AuthMiddleware = struct {
     }
 
     pub fn skipPath(self: *AuthMiddleware, path: []const u8) !void {
-        try self.whitelist.append(self.allocator,try self.allocator.dupe(u8, path));
+        try self.whitelist.append(self.allocator, try self.allocator.dupe(u8, path));
     }
 
-    pub fn process(self: *AuthMiddleware, ctx: *Context) !Middleware.NextAction {
+    pub fn process(self: *AuthMiddleware, ctx: *Context, io: std.Io) !Middleware.NextAction {
+        _ = io;
         // Check whitelist
         for (self.whitelist.items) |path| {
             if (std.mem.startsWith(u8, ctx.request.head.target, path)) {

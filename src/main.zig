@@ -92,11 +92,11 @@ pub fn main() !void {
     var rate_limiter = RateLimiter.init(allocator, .{
         .max_requests = 100,
         .window_ms = 60000,
-    });
+    }, io);
     defer rate_limiter.deinit();
 
     // Initialize Metrics
-    var metrics = Metrics.init(allocator);
+    var metrics = Metrics.init(allocator, io);
     defer metrics.deinit();
 
     // Initialize Logger
@@ -162,7 +162,7 @@ pub fn main() !void {
     server.use(&logger_middleware.middleware);
 
     var cors_middleware = try CORSMiddleware.init(allocator, .{
-        .allowed_origins = &.{ "*" },
+        .allowed_origins = &.{"*"},
         .allowed_methods = &.{ "GET", "POST", "PUT", "DELETE", "OPTIONS" },
         .allowed_headers = &.{ "Content-Type", "Authorization", "X-CSRF-Token" },
     });

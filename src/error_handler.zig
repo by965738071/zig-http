@@ -18,7 +18,7 @@ pub const ErrorResponse = struct {
     message: []const u8,
     details: ?[]const u8 = null,
     path: ?[]const u8 = null,
-    timestamp: i64,
+    timestamp: u64,
 };
 
 /// Error handler
@@ -53,7 +53,7 @@ pub const ErrorHandler = struct {
 
     /// Handle error
     pub fn handle(handler: ErrorHandler, err: anyerror, path: ?[]const u8) !ErrorResponse {
-        const timestamp = std.time.timestamp();
+        const timestamp = try std.time.Instant.now().timestamp;
         const status = handler.errorToStatus(err);
         const message = handler.errorMessage(err);
 

@@ -8,10 +8,10 @@ pub const Metrics = struct {
     total_errors: u64,
     avg_response_time_ms: f64,
     request_counts: std.StringHashMap(u64),
-    mutex: std.Thread.Mutex,
-    start_time: u64,
+    mutex: std.Io.Mutex,
+    start_time: i64,
 
-    pub fn init(allocator: std.mem.Allocator) Metrics {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) Metrics {
         return .{
             .allocator = allocator,
             .total_requests = 0,
@@ -19,11 +19,8 @@ pub const Metrics = struct {
             .total_errors = 0,
             .avg_response_time_ms = 0,
             .request_counts = std.StringHashMap(u64).init(allocator),
-            .mutex = .{},
-            .start_time = blk: {
-                const now = std.time.Instant.now() catch unreachable;
-                break :blk now.timestamp;
-            },
+            .mutex = std.Io.Mutex.init,
+            .start_time = std.Io.Timestamp.now(io, .boot).toMilliseconds(),
         };
     }
 

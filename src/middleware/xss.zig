@@ -17,7 +17,8 @@ pub const XSSMiddleware = struct {
         return self;
     }
 
-    pub fn process(self: *XSSMiddleware, ctx: *Context) !Middleware.NextAction {
+    pub fn process(self: *XSSMiddleware, ctx: *Context, io: std.Io) !Middleware.NextAction {
+        _ = io;
         if (!self.enabled) {
             return Middleware.NextAction.@"continue";
         }

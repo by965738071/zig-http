@@ -321,7 +321,7 @@ fn handleRequest(server: *HTTPServer, request: *http.Server.Request, writer: any
 
     // Execute global middlewares
     for (server.middlewares.items) |middleware| {
-        const action = try middleware.vtable.process(middleware, &context);
+        const action = try middleware.vtable.process(middleware, &context, server.io);
         switch (action) {
             .@"continue" => continue,
             .respond, .err => {
@@ -333,7 +333,7 @@ fn handleRequest(server: *HTTPServer, request: *http.Server.Request, writer: any
 
     // Execute route middlewares
     for (route.middlewares) |middleware| {
-        const action = try middleware.vtable.process(middleware, &context);
+        const action = try middleware.vtable.process(middleware, &context,server.io);
         switch (action) {
             .@"continue" => continue,
             .respond, .err => {

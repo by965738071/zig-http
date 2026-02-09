@@ -30,8 +30,9 @@ pub const CORSMiddleware = struct {
         return self;
     }
 
-    pub fn process(self: *CORSMiddleware, ctx: *Context) !Middleware.NextAction {
+    pub fn process(self: *CORSMiddleware, ctx: *Context, io: std.Io) !Middleware.NextAction {
         // Handle OPTIONS preflight request
+        _ = io;
         if (ctx.request.head.method == .OPTIONS) {
             try self.setCORSHeaders(ctx);
             ctx.response.status = .no_content;

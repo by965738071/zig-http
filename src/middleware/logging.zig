@@ -13,16 +13,16 @@ pub const LoggingMiddleware = struct {
         return self;
     }
 
-    pub fn process(self: *LoggingMiddleware, ctx: *Context) !Middleware.NextAction {
+    pub fn process(self: *LoggingMiddleware, ctx: *Context, io: std.Io) !Middleware.NextAction {
         _ = self;
-        const start = std.time.Instant.now() catch unreachable;
+        const start = std.Io.Timestamp.now(io, .boot);
         defer {
-            const end = std.time.Instant.now() catch unreachable;
-            const elapsed = end.since(start);
+            const duration = start.untilNow(io, .boot);
+
             std.log.info("{s} {s} - {d}μs", .{
                 @tagName(ctx.request.head.method),
                 ctx.request.head.target,
-                elapsed / 1000,
+                duration.toNanoseconds(),
             });
         }
         return Middleware.NextAction.@"continue";

@@ -68,13 +68,13 @@ pub const SessionConfig = struct {
 pub const MemorySessionStore = struct {
     allocator: std.mem.Allocator,
     sessions: std.StringHashMap(*Session),
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
 
     pub fn init(allocator: std.mem.Allocator) MemorySessionStore {
         return .{
             .allocator = allocator,
             .sessions = std.StringHashMap(*Session).init(allocator),
-            .mutex = .{},
+            .mutex = std.Io.Mutex.init,
         };
     }
 

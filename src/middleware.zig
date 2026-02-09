@@ -8,14 +8,14 @@ pub const Middleware = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
-        process: *const fn (*anyopaque, *Context) anyerror!NextAction,
+        process: *const fn (*anyopaque, *Context, std.Io) anyerror!NextAction,
         destroy: *const fn (*anyopaque) void,
     };
 
     pub const NextAction = enum {
-        @"continue",  // Continue to next middleware
-        respond,   // Respond immediately, don't continue
-        err,     // Error handling
+        @"continue", // Continue to next middleware
+        respond, // Respond immediately, don't continue
+        err, // Error handling
     };
 
     pub fn init(comptime T: type) Middleware {
@@ -23,9 +23,9 @@ pub const Middleware = struct {
             .name = @typeName(T),
             .vtable = &.{
                 .process = struct {
-                    fn process(ptr: *anyopaque, ctx: *Context) !NextAction {
+                    fn process(ptr: *anyopaque, ctx: *Context, io: std.Io) !NextAction {
                         const self: *T = @ptrCast(@alignCast(ptr));
-                        return self.process(ctx);
+                        return self.process(ctx, io);
                     }
                 }.process,
                 .destroy = struct {

@@ -18,19 +18,23 @@ pub const RateLimiter = struct {
     allocator: std.mem.Allocator,
     clients: std.StringHashMap(RateLimiterEntry),
     config: RateLimiterConfig,
-    last_cleanup: u64,
-    mutex: std.Thread.Mutex,
+    last_cleanup: i64,
+    mutex: std.Io.Mutex,
 
-    pub fn init(allocator: std.mem.Allocator, config: RateLimiterConfig) RateLimiter {
+    pub fn init(allocator: std.mem.Allocator, config: RateLimiterConfig, io: std.Io) RateLimiter {
         return .{
             .allocator = allocator,
             .clients = std.StringHashMap(RateLimiterEntry).init(allocator),
             .config = config,
-            .last_cleanup = blk: {
-                const now = std.time.Instant.now() catch unreachable;
-                break :blk now.timestamp * 1000; // Convert to ms
-            },
-            .mutex = .{},
+
+            .last_cleanup = std.Io.Timestamp.now(io, .boot).toMilliseconds(),
+            .mutex = std.Io.Mutex.init,
+            // .last_cleanup = blk: {
+            //     const now = std.time
+            //     const now = std.time.Instant.now() catch unreachable;
+            //     break :blk now.timestamp * 1000; // Convert to ms
+            // },
+            // .mutex = .{},
         };
     }
 

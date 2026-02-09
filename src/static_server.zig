@@ -126,7 +126,7 @@ pub const StaticServer = struct {
     }
 
     /// Serve a static file
-    pub fn serveFile(server: *StaticServer, ctx: anytype, file_path: []const u8) !bool {
+    pub fn serveFile(server: *StaticServer, ctx: *Context, file_path: []const u8) !bool {
         _ = @typeInfo(@TypeOf(ctx.response));
 
         // Open file - use new API with io
@@ -169,7 +169,8 @@ pub const StaticServer = struct {
         while (bytes_read < size) {
             const to_read = @min(buffer.len, size - bytes_read);
             var read_buf = [_][]u8{buffer[0..to_read]};
-            const n = try ctx.io.vtable.fileReadStreaming(ctx.io.userdata, file, &read_buf);
+            const n = try std.Io.File.readStreaming(file, ctx.io, &read_buf);
+            //const n = try ctx.io.vtable.fileReadStreaming(ctx.io.userdata, file, &read_buf);
             try ctx.response.writeAll(buffer[0..n]);
             bytes_read += n;
         }
