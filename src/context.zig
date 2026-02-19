@@ -87,21 +87,27 @@ pub const Context = struct {
     /// Get all query parameters as a HashMap
     pub fn getAllQueries(ctx: *Context) !std.StringHashMap([]const u8) {
         const target = ctx.request.head.target;
-        const query_start = std.mem.indexOfScalar(u8, target, '?') orelse return null;
-        
-        var result = std.StringHashMap([]const u8).init(ctx.server.allocator);
+        var result = std.StringHashMap([]const u8).init(ctx.allocator);
         errdefer result.deinit();
 
-        if (query_start) |_| {
-            const query = target[query_start.? + 1 ..];
-            var iter = std.mem.splitScalar(u8, query, '&');
-            while (iter.next()) |pair| {
-                const eq_pos = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
-                const key = pair[0..eq_pos];
-                const value = if (eq_pos != null) pair[eq_pos.? + 1 ..] else "";
-                const key_copy = try ctx.server.allocator.dupe(u8, key);
-                const value_copy = try ctx.server.allocator.dupe(u8, value);
+        const query_start = std.mem.indexOfScalar(u8, target, '?') orelse return result;
+        const query = target[query_start + 1 ..];
+
+        var iter = std.mem.splitScalar(u8, query, '&');
+        while (iter.next()) |pair| {
+            if (pair.len == 0) continue;
+
+            const eq_pos = std.mem.indexOfScalar(u8, pair, '=');
+            if (eq_pos) |pos| {
+                const key = pair[0..pos];
+                const value = pair[pos + 1 ..];
+                const key_copy = try ctx.allocator.dupe(u8, key);
+                errdefer ctx.allocator.free(key_copy);
+                const value_copy = try ctx.allocator.dupe(u8, value);
                 try result.put(key_copy, value_copy);
+            } else {
+                const key_copy = try ctx.allocator.dupe(u8, pair);
+                try result.put(key_copy, "");
             }
         }
 
@@ -121,13 +127,14 @@ pub const Context = struct {
 
     /// Get all headers as a HashMap
     pub fn getAllHeaders(ctx: *Context) !std.StringHashMap([]const u8) {
-        var result = std.StringHashMap([]const u8).init(ctx.server.allocator);
+        var result = std.StringHashMap([]const u8).init(ctx.allocator);
         errdefer result.deinit();
 
         var it = ctx.request.iterateHeaders();
         while (it.next()) |header| {
-            const key_copy = try ctx.server.allocator.dupe(u8, header.name);
-            const value_copy = try ctx.server.allocator.dupe(u8, header.value);
+            const key_copy = try ctx.allocator.dupe(u8, header.name);
+            errdefer ctx.allocator.free(key_copy);
+            const value_copy = try ctx.allocator.dupe(u8, header.value);
             try result.put(key_copy, value_copy);
         }
 
@@ -136,9 +143,11 @@ pub const Context = struct {
 
     pub fn setState(ctx: *Context, key: []const u8, value: anytype) !void {
         const T = @TypeOf(value);
-        const ptr = try ctx.server.allocator.create(T);
+        const ptr = try ctx.allocator.create(T);
         ptr.* = value;
-        try ctx.state.put(key, @ptrCast(ptr));
+
+        const key_copy = try ctx.allocator.dupe(u8, key);
+        try ctx.state.put(key_copy, @ptrCast(ptr));
     }
 
     pub fn getState(ctx: Context, key: []const u8) ?*anyopaque {
@@ -179,7 +188,7 @@ pub const Context = struct {
 
         // Try to parse multipart if not already parsed
         const content_type = ctx.getHeader("Content-Type") orelse return null;
-        if (!std.mem.indexOf(u8, content_type, "multipart/form-data")) |_| {
+        if (std.mem.indexOf(u8, content_type, "multipart/form-data") == null) {
             return null;
         }
 
@@ -193,10 +202,9 @@ pub const Context = struct {
 
         const form = parser.parse(data) catch return null;
 
-        // Store parsed form
+        // Store parsed form - we need a mutable reference
         const form_ptr = ctx.allocator.create(MultipartForm) catch return null;
         form_ptr.* = form;
-        ctx.multipart_form = form_ptr.*;
 
         return form_ptr;
     }

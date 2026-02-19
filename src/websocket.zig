@@ -21,11 +21,13 @@ pub const WebSocketContext = struct {
 
     /// Send a text message
     pub fn sendText(ctx: *WebSocketContext, data: []const u8) !void {
+        std.log.debug("WebSocket sending text message: {s}", .{data});
         try ctx.ws.writeMessage(data, .text);
     }
 
     /// Send a binary message
     pub fn sendBinary(ctx: *WebSocketContext, data: []const u8) !void {
+        std.log.debug("WebSocket sending binary message ({d} bytes)", .{data.len});
         try ctx.ws.writeMessage(data, .binary);
     }
 
@@ -47,7 +49,9 @@ pub const WebSocketContext = struct {
 
     /// Receive a message (blocking)
     pub fn receive(ctx: *WebSocketContext) !Message {
+        std.log.debug("WebSocket waiting for message...", .{});
         const msg = try ctx.ws.readSmallMessage();
+        std.log.debug("WebSocket received message with opcode: {}", .{msg.opcode});
         return .{
             .opcode = msg.opcode,
             .data = try ctx.allocator.dupe(u8, msg.data),
@@ -112,38 +116,55 @@ pub const WebSocketServer = struct {
 
 /// Simple WebSocket echo server example
 pub fn echoServer(ws: *WebSocketContext) !void {
-    std.log.info("WebSocket client connected", .{});
+    std.log.info("WebSocket client connected, starting echo loop", .{});
 
     // Send welcome message
-    try ws.sendText("Welcome to WebSocket echo server!");
+    ws.sendText("Welcome to WebSocket echo server!") catch |err| {
+        std.log.err("Failed to send welcome message: {}", .{err});
+        return;
+    };
 
     while (true) {
-        var msg = try ws.receive();
+        var msg = ws.receive() catch |err| {
+            std.log.err("Error receiving message: {}", .{err});
+            return;
+        };
         defer ws.freeMessage(&msg);
 
         switch (msg.opcode) {
             .text, .binary => {
-                std.log.debug("Received {s} message: {s}", .{
+                std.log.debug("Received {s} message ({d} bytes)", .{
                     @tagName(msg.opcode),
-                    msg.data,
+                    msg.data.len,
                 });
 
                 // Echo back
                 if (msg.opcode == .text) {
-                    try ws.sendText(msg.data);
+                    ws.sendText(msg.data) catch |err| {
+                        std.log.err("Failed to echo text message: {}", .{err});
+                        return;
+                    };
                 } else {
-                    try ws.sendBinary(msg.data);
+                    ws.sendBinary(msg.data) catch |err| {
+                        std.log.err("Failed to echo binary message: {}", .{err});
+                        return;
+                    };
                 }
             },
             .ping => {
-                // Respond with pong
-                try ws.pong(msg.data);
+                std.log.debug("Received ping, sending pong", .{});
+                ws.pong(msg.data) catch |err| {
+                    std.log.err("Failed to send pong: {}", .{err});
+                    return;
+                };
             },
             .connection_close => {
                 std.log.info("Client requested close", .{});
                 return;
             },
-            else => {},
+            else => {
+                std.log.debug("Received opcode: {}", .{msg.opcode});
+            },
         }
     }
 }

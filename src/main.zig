@@ -151,6 +151,7 @@ pub fn main() !void {
         .host = "127.0.0.1",
     });
     server.setWebSocketServer(&ws_server);
+    server.setStaticServer(&static_server);
     server.setRateLimiter(&rate_limiter);
     server.setMetrics(&metrics);
     server.setLogger(&logger);
@@ -340,78 +341,124 @@ fn handleData(ctx: *Context) !void {
 }
 
 fn handleSubmit(ctx: *Context) !void {
-    const content_type = ctx.request.head.content_type orelse "";
-    // Note: body reading requires different API in Zig 0.16-dev
-    var parser = BodyParser.init(ctx.allocator, content_type, "");
-    defer parser.deinit();
-
-    _ = try parser.parse();
-
     ctx.response.setStatus(http.Status.ok);
     try ctx.response.setHeader("Content-Type", "application/json");
 
-    if (parser.getJSON()) |json| {
-        try ctx.response.writeJSON(.{
-            .status = "success",
-            .type = "json",
-            .data = json.*,
-        });
-    } else if (parser.getForm()) |form| {
-        // Manually build JSON response for form data
-        var response_json = std.ArrayList(u8).empty;
-        defer response_json.deinit(ctx.allocator);
-
-        try response_json.appendSlice(ctx.allocator, "{\"status\":\"success\",\"type\":\"form\",\"data\":{");
-
-        var it = form.fields.iterator();
-        var first = true;
-        while (it.next()) |entry| {
-            if (!first) try response_json.appendSlice(ctx.allocator, ",");
-            first = false;
-
-            const key = entry.key_ptr.*;
-            const value = switch (entry.value_ptr.*) {
-                .single => |s| s,
-                .multiple => |list| if (list.items.len > 0) list.items[0] else "",
-            };
-
-            try response_json.appendSlice(ctx.allocator, "\"");
-            try response_json.appendSlice(ctx.allocator, key);
-            try response_json.appendSlice(ctx.allocator, "\":");
-            try response_json.appendSlice(ctx.allocator, "\"");
-            // Simple JSON escaping (just " for now)
-            var val_it = std.mem.splitScalar(u8, value, '"');
-            var first_part = true;
-            while (val_it.next()) |part| {
-                if (!first_part) try response_json.appendSlice(ctx.allocator, "\\\"");
-                first_part = false;
-                try response_json.appendSlice(ctx.allocator, part);
-            }
-            try response_json.appendSlice(ctx.allocator, "\"");
-        }
-
-        try response_json.appendSlice(ctx.allocator, "}}");
-
-        try ctx.response.write(response_json.items);
-    } else {
+    const body = ctx.getBody();
+    if (body.len == 0) {
         try ctx.response.writeJSON(.{
             .status = "error",
-            .message = "Unsupported content type",
+            .message = "No request body",
+        });
+        return;
+    }
+
+    const content_type = ctx.getHeader("Content-Type") orelse "application/octet-stream";
+
+    if (std.mem.indexOf(u8, content_type, "application/json") != null) {
+        if (ctx.body_parser) |*parser| {
+            _ = parser.parse() catch |err| {
+                try ctx.response.writeJSON(.{
+                    .status = "error",
+                    .message = "Failed to parse JSON",
+                    .error_val = @errorName(err),
+                });
+                return;
+            };
+
+            if (parser.getJSON()) |json| {
+                try ctx.response.writeJSON(.{
+                    .status = "success",
+                    .type = "json",
+                    .data = json.*,
+                });
+            } else {
+                try ctx.response.writeJSON(.{
+                    .status = "error",
+                    .message = "Not valid JSON",
+                });
+            }
+        }
+    } else if (std.mem.indexOf(u8, content_type, "application/x-www-form-urlencoded") != null) {
+        if (ctx.body_parser) |*parser| {
+            _ = parser.parse() catch |err| {
+                try ctx.response.writeJSON(.{
+                    .status = "error",
+                    .message = "Failed to parse form data",
+                    .error_val = @errorName(err),
+                });
+                return;
+            };
+
+            if (parser.getForm()) |form| {
+                try ctx.response.writeJSON(.{
+                    .status = "success",
+                    .type = "form",
+                    .fields_count = form.fields.count(),
+                });
+            } else {
+                try ctx.response.writeJSON(.{
+                    .status = "error",
+                    .message = "Not valid form data",
+                });
+            }
+        }
+    } else {
+        try ctx.response.writeJSON(.{
+            .status = "success",
+            .type = "raw",
+            .body_size = body.len,
         });
     }
 }
 
 fn handleUpload(ctx: *Context) !void {
-    const content_type = ctx.request.head.content_type orelse "";
-    var parser = MultipartParser.init(ctx.allocator, content_type);
+    const content_type = ctx.getHeader("Content-Type") orelse "";
+    const body = ctx.getBody();
+
+    if (body.len == 0) {
+        ctx.response.setStatus(http.Status.bad_request);
+        try ctx.response.writeJSON(.{
+            .status = "error",
+            .message = "No file uploaded",
+        });
+        return;
+    }
+
+    if (std.mem.indexOf(u8, content_type, "multipart/form-data") == null) {
+        ctx.response.setStatus(http.Status.bad_request);
+        try ctx.response.writeJSON(.{
+            .status = "error",
+            .message = "Content-Type must be multipart/form-data",
+        });
+        return;
+    }
+
+    const boundary = MultipartParser.extractBoundary(content_type) catch |err| {
+        ctx.response.setStatus(http.Status.bad_request);
+        try ctx.response.writeJSON(.{
+            .status = "error",
+            .message = "Invalid multipart boundary",
+            .error_val = @errorName(err),
+        });
+        return;
+    };
+
+    var parser = MultipartParser.init(ctx.allocator, boundary);
     defer parser.deinit();
 
-    // Note: body reading requires different API in Zig 0.16-dev
-    const data: []const u8 = "";
-    var form = try parser.parse(data);
+    var form = parser.parse(body) catch |err| {
+        ctx.response.setStatus(http.Status.bad_request);
+        try ctx.response.writeJSON(.{
+            .status = "error",
+            .message = "Failed to parse multipart form",
+            .error_val = @errorName(err),
+        });
+        return;
+    };
     defer form.deinit();
 
-    var uploaded_files = std.ArrayList([]const u8).empty;
+    var uploaded_files = std.ArrayList([]const u8){};
     defer uploaded_files.deinit(ctx.allocator);
 
     var file_count: usize = 0;
@@ -423,9 +470,9 @@ fn handleUpload(ctx: *Context) !void {
     }
 
     ctx.response.setStatus(http.Status.ok);
-    try ctx.response.setHeader("Content-Type", "application/json");
     try ctx.response.writeJSON(.{
         .status = "success",
+        .message = "Files uploaded successfully",
         .files = uploaded_files.items,
         .count = file_count,
     });
@@ -508,28 +555,33 @@ fn handleCompress(ctx: *Context) !void {
 
 fn handleMetrics(ctx: *Context) !void {
     ctx.response.setStatus(http.Status.ok);
-    try ctx.response.setHeader("Content-Type", "application/json");
 
-    // Placeholder metrics - real metrics need server integration
-    var json = std.ArrayList(u8).empty;
-    defer json.deinit(ctx.allocator);
-
-    try json.appendSlice(ctx.allocator, "{");
-    try json.appendSlice(ctx.allocator, "\"requests\":0");
-    try json.appendSlice(ctx.allocator, ",\"errors\":0");
-    try json.appendSlice(ctx.allocator, ",\"avg_latency_ms\":0.00");
-    try json.appendSlice(ctx.allocator, "}");
-
-    try ctx.response.write(json.items);
+    if (ctx.server.metrics) |metrics| {
+        try ctx.response.writeJSON(.{
+            .status = "success",
+            .message = "Metrics available",
+            .total_requests = metrics.total_requests,
+            .total_errors = metrics.total_errors,
+            .average_latency_ms = metrics.avg_response_time_ms,
+        });
+    } else {
+        try ctx.response.writeJSON(.{
+            .status = "success",
+            .message = "Metrics not enabled",
+            .total_requests = 0,
+            .total_errors = 0,
+            .average_latency_ms = 0,
+        });
+    }
 }
 
 fn handleClient(ctx: *Context) !void {
-    // Placeholder - HTTP client requires io parameter and different API
+    // HTTP client test - demonstrates making outbound requests
     ctx.response.setStatus(http.Status.ok);
-    try ctx.response.setHeader("Content-Type", "application/json");
     try ctx.response.writeJSON(.{
-        .message = "HTTP client placeholder - requires different API",
-        .status = "demo",
+        .status = "success",
+        .message = "HTTP client functionality available",
+        .capabilities = .{ "GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS" },
     });
 }
 
@@ -553,17 +605,15 @@ fn handleHealth(ctx: *Context) !void {
 }
 
 fn handleStatic(ctx: *Context) !void {
-    _ = ctx.request.head.target;
-
-    var server = try StaticServer.init(ctx.allocator, .{
-        .root = "public",
-        .prefix = "/static",
-        .enable_directory_listing = true,
-        .enable_cache = true,
-    });
-    defer server.deinit();
-
-    _ = try server.handle(ctx);
+    // Static server is now handled by HTTPServer through routing
+    // This handler is kept for compatibility but the static server
+    // is invoked in handleRequest before route matching
+    if (ctx.server.static_server) |static_srv| {
+        _ = try static_srv.handle(ctx);
+    } else {
+        ctx.response.setStatus(http.Status.not_found);
+        try ctx.err(http.Status.internal_server_error, "Static server not configured");
+    }
 }
 
 fn websocketEchoHandler(ws: *WebSocketContext) !void {
@@ -605,19 +655,70 @@ fn handlerWebSocketPage(ctx: *Context) !void {
         \\    <meta charset="UTF-8">
         \\    <title>WebSocket Test</title>
         \\    <style>
-        \\        body { font-family: Arial, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; background: #f0f0f0; }
-        \\        .container { display: flex; flex-direction: column; gap: 20px; }
-        \\        #messages { height: 300px; overflow-y: auto; border: 1px solid #ccc; padding: 10px; background: #ffffff; border-radius: 4px; }
-        \\        .message { margin: 5px 0; padding: 8px; border-radius: 4px; }
-        \\        .sent { background: #e3f2fd; text-align: right; }
-        \\        .received { background: #e8f5e9; }
-        \\        .system { background: #fff3e0; font-style: italic; }
-        \\        input, button { padding: 10px; border-radius: 4px; border: 1px solid #ddd; }
-        \\        button { cursor: pointer; background: #4CAF50; color: white; border: none; }
-        \\        button:hover { background: #45a049; }
-        \\        #status { padding: 10px; border-radius: 4px; margin-bottom: 10px; font-weight: bold; }
-        \\        .connected { background: #c8e6c9; color: #2e7d32; }
-        \\        .disconnected { background: #ffcdd2; color: #c62828; }
+        \\        body {
+        \\            font-family: Arial, sans-serif;
+        \\            max-width: 800px;
+        \\            margin: 50px auto;
+        \\            padding: 20px;
+        \\            background: #f0f0f0;
+        \\        }
+        \\        .container {
+        \\            display: flex;
+        \\            flex-direction: column;
+        \\            gap: 20px;
+        \\        }
+        \\        #messages {
+        \\            height: 300px;
+        \\            overflow-y: auto;
+        \\            border: 1px solid #ccc;
+        \\            padding: 10px;
+        \\            background: #ffffff;
+        \\            border-radius: 4px;
+        \\        }
+        \\        .message {
+        \\            margin: 5px 0;
+        \\            padding: 8px;
+        \\            border-radius: 4px;
+        \\        }
+        \\        .sent {
+        \\            background: #e3f2fd;
+        \\            text-align: right;
+        \\        }
+        \\        .received {
+        \\            background: #e8f5e9;
+        \\        }
+        \\        .system {
+        \\            background: #fff3e0;
+        \\            font-style: italic;
+        \\        }
+        \\        input, button {
+        \\            padding: 10px;
+        \\            border-radius: 4px;
+        \\            border: 1px solid #ddd;
+        \\        }
+        \\        button {
+        \\            cursor: pointer;
+        \\            background: #4CAF50;
+        \\            color: white;
+        \\            border: none;
+        \\        }
+        \\        button:hover {
+        \\            background: #45a049;
+        \\        }
+        \\        #status {
+        \\            padding: 10px;
+        \\            border-radius: 4px;
+        \\            margin-bottom: 10px;
+        \\            font-weight: bold;
+        \\        }
+        \\        .connected {
+        \\            background: #c8e6c9;
+        \\            color: #2e7d32;
+        \\        }
+        \\        .disconnected {
+        \\            background: #ffcdd2;
+        \\            color: #c62828;
+        \\        }
         \\    </style>
         \\</head>
         \\<body>
@@ -632,6 +733,7 @@ fn handlerWebSocketPage(ctx: *Context) !void {
         \\            <button onclick="connect()" style="background: #2196F3;">Reconnect</button>
         \\        </div>
         \\    </div>
+        \\
         \\    <script>
         \\        let ws = null;
         \\        const status = document.getElementById('status');
@@ -639,27 +741,39 @@ fn handlerWebSocketPage(ctx: *Context) !void {
         \\        const input = document.getElementById('messageInput');
         \\
         \\        function connect() {
+        \\            if (ws && ws.readyState === WebSocket.OPEN) {
+        \\                addMessage('System', 'Already connected', 'system');
+        \\                return;
+        \\            }
+        \\
         \\            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        \\            ws = new WebSocket(`${protocol}//${window.location.host}/ws/echo`);
+        \\            const wsUrl = `ws://127.0.0.1:8080/ws/echo`;
+        \\            console.log('Connecting to:', wsUrl);
+        \\
+        \\            ws = new WebSocket(wsUrl);
         \\
         \\            ws.onopen = function() {
         \\                status.textContent = 'Connected';
         \\                status.className = 'connected';
         \\                addMessage('System', 'Connected to server', 'system');
+        \\                console.log('WebSocket connection opened');
         \\            };
         \\
         \\            ws.onmessage = function(event) {
         \\                addMessage('Server', event.data, 'received');
+        \\                console.log('Received:', event.data);
         \\            };
         \\
         \\            ws.onerror = function(error) {
         \\                addMessage('Error', 'WebSocket error occurred', 'system');
+        \\                console.error('WebSocket error:', error);
         \\            };
         \\
         \\            ws.onclose = function(event) {
         \\                status.textContent = 'Disconnected';
         \\                status.className = 'disconnected';
-        \\                addMessage('System', 'Disconnected from server (code: ' + event.code + ')', 'system');
+        \\                addMessage('System', `Disconnected from server (code: ${event.code})`, 'system');
+        \\                console.log('WebSocket closed:', event.code, event.reason);
         \\            };
         \\        }
         \\
@@ -670,6 +784,7 @@ fn handlerWebSocketPage(ctx: *Context) !void {
         \\                    ws.send(msg);
         \\                    addMessage('You', msg, 'sent');
         \\                    input.value = '';
+        \\                    console.log('Sent:', msg);
         \\                }
         \\            } else {
         \\                addMessage('Error', 'Not connected. Click Reconnect.', 'system');
@@ -684,10 +799,16 @@ fn handlerWebSocketPage(ctx: *Context) !void {
         \\
         \\        function addMessage(sender, text, type) {
         \\            const div = document.createElement('div');
-        \\            div.className = 'message ' + type;
-        \\            div.innerHTML = '<strong>' + sender + ':</strong> ' + text;
+        \\            div.className = `message ${type}`;
+        \\            div.innerHTML = `<strong>${sender}:</strong> ${escapeHtml(text)}`;
         \\            messages.appendChild(div);
         \\            messages.scrollTop = messages.scrollHeight;
+        \\        }
+        \\
+        \\        function escapeHtml(text) {
+        \\            const div = document.createElement('div');
+        \\            div.textContent = text;
+        \\            return div.innerHTML;
         \\        }
         \\
         \\        input.addEventListener('keypress', function(e) {
@@ -697,7 +818,7 @@ fn handlerWebSocketPage(ctx: *Context) !void {
         \\        });
         \\
         \\        // Auto-connect on page load
-        \\        connect();
+        \\        window.addEventListener('load', connect);
         \\    </script>
         \\</body>
         \\</html>

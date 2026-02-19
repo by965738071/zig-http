@@ -223,7 +223,7 @@ pub const StaticServer = struct {
     /// Serve directory listing
     pub fn serveDirectory(server: *StaticServer, ctx: anytype, dir_path: []const u8) !bool {
         _ = @typeInfo(@TypeOf(ctx.response));
-        _ = ctx.response.writer;
+        // writer field removed
 
         const dir = try std.Io.Dir.cwd().openDir(ctx.io, dir_path, .{});
         defer dir.close(ctx.io);

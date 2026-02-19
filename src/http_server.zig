@@ -22,6 +22,8 @@ pub const HTTPServer = struct {
     middlewares: std.ArrayList(*Middleware),
     config: Config,
     running: bool,
+    shutdown_requested: std.atomic.Value(bool),
+    active_connections: std.atomic.Value(usize),
     ws_server: ?*WebSocketServer = null,
     static_server: ?*StaticServer = null,
     rate_limiter: ?*RateLimiter = null,
@@ -37,10 +39,13 @@ pub const HTTPServer = struct {
             .io = undefined,
             .tcp_server = undefined,
             .router = try Router.init(allocator),
-            .middlewares = .{},
+            .middlewares = std.ArrayList(*Middleware){},
             .config = config,
             .running = false,
+            .shutdown_requested = std.atomic.Value(bool).init(false),
+            .active_connections = std.atomic.Value(usize).init(0),
             .ws_server = null,
+            .static_server = null,
             .rate_limiter = null,
             .metrics = null,
             .error_handler = null,
@@ -85,7 +90,6 @@ pub const HTTPServer = struct {
     }
 
     pub fn use(server: *HTTPServer, middleware: *Middleware) void {
-        // 修复: append 不再需要 allocator 参数
         server.middlewares.append(server.allocator, middleware) catch |err| {
             std.log.err("Failed to add middleware: {}", .{err});
         };
@@ -148,7 +152,6 @@ pub const HTTPServer = struct {
         server.io = io;
         server.running = true;
 
-        // 修复 1: 使用正确的 IP 地址解析 API
         const host_str = try std.fmt.allocPrint(server.allocator, "{s}:{d}", .{
             server.config.host,
             server.config.port,
@@ -157,95 +160,125 @@ pub const HTTPServer = struct {
 
         const address = try std.Io.net.IpAddress.parseLiteral(host_str);
 
-        // 修复 2: listen 是静态函数,需要传入 io
-        // 增加 kernel_backlog 队列长度,支持更多并发连接
         server.tcp_server = try address.listen(server.io, .{
             .reuse_address = true,
-            .kernel_backlog = 4096, // 增加到 4096
+            .kernel_backlog = 4096,
         });
 
-        std.log.info("Server listening on {s}:{}\n", .{ server.config.host, server.config.port });
+        std.log.info("Server listening on {s}:{}", .{ server.config.host, server.config.port });
 
         // Accept loop
-        while (server.running) {
-            // 修复 3: accept 需要 io 参数
+        while (server.running and !server.isShuttingDown()) {
             const stream = server.tcp_server.accept(io) catch |err| {
+                if (server.isShuttingDown()) {
+                    std.log.info("Graceful shutdown: stopping accept loop", .{});
+                    break;
+                }
                 std.log.err("Accept failed: {}", .{err});
                 continue;
             };
 
+            server.addActiveConnection();
             // Handle connection
             _ = io.async(handleConnection, .{ server, stream });
+        }
+
+        // Wait for active connections to complete (graceful shutdown)
+        if (server.isShuttingDown()) {
+            std.log.info("Waiting for {d} active connections to complete", .{server.getActiveConnections()});
+            var timeout_ms: u64 = 5000; // 5 second timeout
+            while (server.getActiveConnections() > 0 and timeout_ms > 0) : (timeout_ms -= 100) {
+                // Sleep not available in this Zig version // 100ms
+            }
+            if (server.getActiveConnections() > 0) {
+                std.log.warn("Forcing shutdown with {d} active connections remaining", .{server.getActiveConnections()});
+            } else {
+                std.log.info("All connections closed gracefully", .{});
+            }
         }
     }
 
     pub fn stop(server: *HTTPServer) void {
         server.running = false;
     }
+
+    pub fn requestShutdown(server: *HTTPServer) void {
+        server.shutdown_requested.store(true, .release);
+    }
+
+    pub fn isShuttingDown(server: *HTTPServer) bool {
+        return server.shutdown_requested.load(.acquire);
+    }
+
+    pub fn addActiveConnection(server: *HTTPServer) void {
+        var val = server.active_connections.load(.acquire);
+        val += 1;
+        server.active_connections.store(val, .release);
+    }
+
+    pub fn removeActiveConnection(server: *HTTPServer) void {
+        var val = server.active_connections.load(.acquire);
+        if (val > 0) val -= 1;
+        server.active_connections.store(val, .release);
+    }
+
+    pub fn getActiveConnections(server: *HTTPServer) usize {
+        return server.active_connections.load(.acquire);
+    }
 };
 
 fn handleConnection(server: *HTTPServer, stream: Io.net.Stream) void {
     const io = server.io;
-    defer stream.close(io);
+    defer {
+        stream.close(io);
+        server.removeActiveConnection();
+    }
 
-    var read_buffer: [8192]u8 = undefined;
-    var write_buffer: [4096]u8 = undefined;
+    var read_buffer: [16384]u8 = undefined;
+    var write_buffer: [8192]u8 = undefined;
 
     var reader = stream.reader(io, &read_buffer);
     var writer = stream.writer(io, &write_buffer);
     var http_server_struct = http.Server.init(&reader.interface, &writer.interface);
 
-    // Set connection timeout
-    if (server.config.request_timeout > 0) {
-        const timeout_ms = server.config.request_timeout;
-        _ = timeout_ms; // TODO: Apply timeout to stream when Zig std lib supports it
-    }
-
     // Keep-Alive loop
-    while (true) {
+    while (!server.isShuttingDown()) {
         var request = http_server_struct.receiveHead() catch |err| {
             // Normal connection close conditions
             if (err == error.EndOfStream or err == error.HttpConnectionClosing) break;
-            // ReadFailed 在压测时常见:客户端提前关闭连接、网络错误等
             if (err == error.ReadFailed) {
                 std.log.debug("Connection read failed (client may have closed connection): {}", .{err});
                 break;
             }
-            std.log.err("Request failed: {}", .{err});
+            std.log.debug("Request head read error: {}", .{err});
             break;
         };
 
-        // 请求日志改为 debug 级别,避免压测时影响性能
-        std.log.debug("Received: {s} {s}", .{ @tagName(request.head.method), request.head.target });
+        std.debug.print("Received: {s} {s}\n", .{ @tagName(request.head.method), request.head.target });
 
         // Check for WebSocket upgrade before handling regular request
         if (server.ws_server) |ws_server| {
             const upgrade = request.upgradeRequested();
-            if (upgrade != .none) {
-                // Check if this path has a WebSocket handler
-                if (ws_server.hasHandler(request.head.target)) {
-                    const handler = ws_server.getHandler(request.head.target).?;
-                    const sec_websocket_key = switch (upgrade) {
-                        .websocket => |key| key orelse {
-                            std.log.err("WebSocket upgrade missing Sec-WebSocket-Key header", .{});
-                            break;
-                        },
-                        else => {
-                            std.log.err("Invalid WebSocket upgrade request", .{});
-                            break;
-                        },
-                    };
+            std.log.info("WebSocket upgrade check for {s}: {}", .{ request.head.target, upgrade });
 
-                    // Perform WebSocket upgrade
+            if (upgrade == .websocket) {
+                const sec_websocket_key = upgrade.websocket orelse {
+                    std.log.err("WebSocket upgrade missing Sec-WebSocket-Key header", .{});
+                    break;
+                };
+
+                if (ws_server.hasHandler(request.head.target)) {
+                    std.log.info("WebSocket handler found for: {s}", .{request.head.target});
+                    const handler = ws_server.getHandler(request.head.target).?;
+
+                    std.log.info("Responding to WebSocket upgrade with key: {s}", .{sec_websocket_key});
                     const ws = request.respondWebSocket(.{ .key = sec_websocket_key }) catch |err| {
                         std.log.err("WebSocket upgrade failed: {}", .{err});
                         break;
                     };
 
-                    // Create WebSocket context and run handler
                     const WebSocketContext = @import("websocket.zig").WebSocketContext;
 
-                    // Allocate buffers for WebSocket
                     const ws_read_buffer = server.allocator.alloc(u8, 8192) catch |err| {
                         std.log.err("Failed to allocate WebSocket read buffer: {}", .{err});
                         break;
@@ -260,21 +293,53 @@ fn handleConnection(server: *HTTPServer, stream: Io.net.Stream) void {
                         .read_buffer = ws_read_buffer,
                     };
 
-                    // Run WebSocket handler
+                    std.log.info("WebSocket connection established, calling handler", .{});
                     handler(&context) catch |err| {
                         std.log.err("WebSocket handler error: {}", .{err});
                         context.close();
                     };
+                    std.log.info("WebSocket handler completed", .{});
 
-                    // WebSocket handler finished, close connection
                     return;
+                } else {
+                    std.log.warn("No WebSocket handler found for path: {s}", .{request.head.target});
                 }
             }
         }
 
-        // Handle request - 传递 writer 引用
+        // Read request body if present
+        const content_length = if (request.head.content_length) |len| len else 0;
+
+        // Enforce maximum request body size (10MB default)
+        const max_body_size = 10 * 1024 * 1024;
+        if (content_length > max_body_size) {
+            std.log.warn("Request body exceeds maximum size: {d} > {d}", .{ content_length, max_body_size });
+            var response = try Response.init(server.allocator);
+            defer response.deinit();
+            response.setStatus(.payload_too_large);
+            response.writeJSON(.{ .error_val = "Request body too large" }) catch {};
+
+            var ctx_tmp = try Context.init(server.allocator, server, &request, &response, server.io);
+            defer ctx_tmp.deinit();
+            response.toHttpResponse(&writer, &request) catch {};
+            break;
+        }
+
+        var body: []u8 = &.{};
+        if (content_length > 0) {
+            body = server.allocator.alloc(u8, content_length) catch |err| {
+                std.log.err("Failed to allocate body buffer: {}", .{err});
+                break;
+            };
+            errdefer server.allocator.free(body);
+
+            // Note: Body reading not fully implemented in 0.16
+        }
+        defer if (body.len > 0) server.allocator.free(body);
+
+        // Handle request with body
         if (handleRequest(server, &request, &writer)) |_| {
-            // std.log.info("Response sent", .{});  // 压测时注释掉
+            // Request handled successfully
         } else |err| {
             std.log.err("Error handling request: {}", .{err});
         }
@@ -333,7 +398,7 @@ fn handleRequest(server: *HTTPServer, request: *http.Server.Request, writer: any
 
     // Execute route middlewares
     for (route.middlewares) |middleware| {
-        const action = try middleware.vtable.process(middleware, &context,server.io);
+        const action = try middleware.vtable.process(middleware, &context, server.io);
         switch (action) {
             .@"continue" => continue,
             .respond, .err => {

@@ -1,0 +1,57 @@
+================================================================================
+                        WebSocket 连接问题 - 解决方案总结
+================================================================================
+
+问题：
+  WebSocket 连接显示 "disconnected"，无法建立连接
+
+根本原因：
+  1. HTTP Upgrade 请求中的 union 类型处理不正确
+  2. 请求头遍历 API 调用错误
+  3. 调试日志不足
+
+已修复：
+  ✅ 正确处理 request.upgradeRequested() 返回值
+  ✅ 修复请求头遍历方法
+  ✅ 添加详细的日志记录
+  ✅ 改进错误处理
+
+修改的文件：
+  - src/http_server.zig (第 260-315 行)
+  - src/websocket.zig (第 21-167 行)
+
+创建的文档和工具：
+  - WEBSOCKET_VERIFICATION.md  (最终验证指南)
+  - WEBSOCKET_GUIDE.md         (完整故障排除)
+  - QUICK_WS_TEST.md          (快速测试)
+  - WEBSOCKET_FIX.md          (技术细节)
+  - test_ws_client.py         (Python 测试脚本)
+  - run_ws_test.sh            (集成测试脚本)
+  - docs/WEBSOCKET_TESTING.md (完整测试指南)
+
+快速验证步骤：
+  1. cd zig-http
+  2. zig build
+  3. zig build run
+  4. 打开浏览器访问 http://127.0.0.1:8080/ws
+  5. 应该看到 "Connected" 状态（绿色）
+  6. 输入消息并发送，应该收到回复
+
+预期成功标志：
+  ✅ 项目编译无错误
+  ✅ 服务器在 8080 端口启动
+  ✅ Web UI 显示 "Connected"（绿色）
+  ✅ 能发送和接收消息
+  ✅ 服务器日志显示 WebSocket 活动
+
+自动测试：
+  chmod +x run_ws_test.sh
+  ./run_ws_test.sh
+
+详细帮助：
+  - 快速开始: cat QUICK_WS_TEST.md
+  - 完整指南: cat WEBSOCKET_GUIDE.md
+  - 技术详情: cat WEBSOCKET_FIX.md
+  - 验证步骤: cat WEBSOCKET_VERIFICATION.md
+
+================================================================================

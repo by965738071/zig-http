@@ -10,7 +10,7 @@ pub const Metrics = struct {
     request_counts: std.StringHashMap(u64),
     mutex: std.Io.Mutex,
     start_time: i64,
-
+    
     pub fn init(allocator: std.mem.Allocator, io: std.Io) Metrics {
         return .{
             .allocator = allocator,
