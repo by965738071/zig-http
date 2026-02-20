@@ -45,46 +45,38 @@ pub const StaticServer = struct {
 
     /// Initialize common MIME type mappings
     fn initMimeTypes(map: *std.StringHashMap([]const u8)) !void {
-        const extensions = [_][]const u8{
-            ".html",        "text/html; charset=utf-8",
-            ".htm",         "text/html; charset=utf-8",
-            ".css",         "text/css; charset=utf-8",
-            ".js",          "application/javascript; charset=utf-8",
-            ".mjs",         "application/javascript; charset=utf-8",
-            ".json",        "application/json; charset=utf-8",
-            ".xml",         "application/xml; charset=utf-8",
-            ".png",         "image/png",
-            ".jpg",         "image/jpeg",
-            ".jpeg",        "image/jpeg",
-            ".gif",         "image/gif",
-            ".svg",         "image/svg+xml",
-            ".ico",         "image/x-icon",
-            ".webp",        "image/webp",
-            ".pdf",         "application/pdf",
-            ".zip",         "application/zip",
-            ".gz",          "application/gzip",
-            ".txt",         "text/plain; charset=utf-8",
-            ".md",          "text/markdown; charset=utf-8",
-            ".markdown",    "text/markdown; charset=utf-8",
-            ".woff",        "font/woff",
-            ".woff2",       "font/woff2",
-            ".ttf",         "font/ttf",
-            ".eot",         "application/vnd.ms-fontobject",
-            ".mp4",         "video/mp4",
-            ".webm",        "video/webm",
-            ".mp3",         "audio/mpeg",
-            ".wav",         "audio/wav",
-            ".ogg",         "audio/ogg",
-            ".wasm",        "application/wasm",
-            ".webmanifest", "application/manifest+json",
-        };
-
-        inline for (extensions) |item| {
-            const eq = std.mem.indexOfScalar(u8, item, ',');
-            const ext = if (eq) |e| item[0..e] else item;
-            const mime = if (eq) |e| item[e + 2 ..] else item;
-            try map.put(ext, mime);
-        }
+        // Explicitly insert known mappings to avoid parsing heuristics
+        try map.put(".html", "text/html; charset=utf-8");
+        try map.put(".htm", "text/html; charset=utf-8");
+        try map.put(".css", "text/css; charset=utf-8");
+        try map.put(".js", "application/javascript; charset=utf-8");
+        try map.put(".mjs", "application/javascript; charset=utf-8");
+        try map.put(".json", "application/json; charset=utf-8");
+        try map.put(".xml", "application/xml; charset=utf-8");
+        try map.put(".png", "image/png");
+        try map.put(".jpg", "image/jpeg");
+        try map.put(".jpeg", "image/jpeg");
+        try map.put(".gif", "image/gif");
+        try map.put(".svg", "image/svg+xml");
+        try map.put(".ico", "image/x-icon");
+        try map.put(".webp", "image/webp");
+        try map.put(".pdf", "application/pdf");
+        try map.put(".zip", "application/zip");
+        try map.put(".gz", "application/gzip");
+        try map.put(".txt", "text/plain; charset=utf-8");
+        try map.put(".md", "text/markdown; charset=utf-8");
+        try map.put(".markdown", "text/markdown; charset=utf-8");
+        try map.put(".woff", "font/woff");
+        try map.put(".woff2", "font/woff2");
+        try map.put(".ttf", "font/ttf");
+        try map.put(".eot", "application/vnd.ms-fontobject");
+        try map.put(".mp4", "video/mp4");
+        try map.put(".webm", "video/webm");
+        try map.put(".mp3", "audio/mpeg");
+        try map.put(".wav", "audio/wav");
+        try map.put(".ogg", "audio/ogg");
+        try map.put(".wasm", "application/wasm");
+        try map.put(".webmanifest", "application/manifest+json");
     }
 
     /// Get MIME type for a file extension
@@ -95,8 +87,9 @@ pub const StaticServer = struct {
 
     /// Get file extension
     fn getExtension(path: []const u8) []const u8 {
+        // Return extension including the leading dot (e.g., ".txt")
         const last_dot = mem.lastIndexOfScalar(u8, path, '.');
-        return if (last_dot) |idx| path[idx + 1 ..] else "";
+        return if (last_dot) |idx| path[idx..] else "";
     }
 
     /// Resolve safe file path (prevent directory traversal)
@@ -149,7 +142,9 @@ pub const StaticServer = struct {
         // Set headers
         if (server.config.enable_cache) {
             try ctx.response.setHeader("Cache-Control", "public, max-age=3600");
-            try ctx.response.setHeader("ETag", try generateETag(file, stat));
+            const etag = try generateETag(server.allocator, stat);
+            defer server.allocator.free(etag);
+            try ctx.response.setHeader("ETag", etag);
         }
 
         try ctx.response.setHeader("Content-Type", mime);
@@ -158,7 +153,7 @@ pub const StaticServer = struct {
         // Check for Range header
         const range_header = ctx.getHeader("Range");
         if (range_header) |range_str| {
-            if (try handleRangeRequest(ctx, file, size, range_str)) {
+            if (try handleRangeRequest(server, ctx, file, file_path, size, range_str)) {
                 return true;
             }
         }
@@ -179,10 +174,8 @@ pub const StaticServer = struct {
     }
 
     /// Handle Range request for partial content
-    fn handleRangeRequest(ctx: anytype, file: std.Io.File, size: u64, range_str: []const u8) !bool {
-        _ = file;
-
-        // Parse "bytes=start-end" format
+    fn handleRangeRequest(server: *StaticServer, ctx: *Context, file: std.Io.File, file_path: []const u8, size: u64, range_str: []const u8) !bool {
+        // Only support simple single-range of the form: bytes=start-end
         if (!mem.startsWith(u8, range_str, "bytes=")) return false;
 
         const range_spec = range_str["bytes=".len..];
@@ -205,18 +198,58 @@ pub const StaticServer = struct {
         }
 
         if (end >= size) end = size - 1;
+        if (end < start) {
+            ctx.response.setStatus(http.Status.range_not_satisfiable);
+            try ctx.text("Invalid range");
+            return false;
+        }
 
-        // TODO: Range support requires seek capability which may not be available in std.Io.File
-        // For now, we'll serve the entire file instead of partial content
-        // This is a temporary workaround for Zig 0.16-dev API changes
-        return false;
+        const chunk_len: u64 = end - start + 1;
+
+        // Set Partial Content response and headers
+        ctx.response.setStatus(http.Status.partial_content);
+        // Content-Range: bytes start-end/size
+        const cr = try std.fmt.allocPrint(ctx.allocator, "bytes {d}-{d}/{d}", .{ start, end, size });
+        defer ctx.allocator.free(cr);
+        try ctx.response.setHeader("Content-Range", cr);
+
+        try ctx.response.setHeader("Accept-Ranges", "bytes");
+        const cl = try std.fmt.allocPrint(ctx.allocator, "{d}", .{chunk_len});
+        defer ctx.allocator.free(cl);
+        try ctx.response.setHeader("Content-Length", cl);
+
+        // Stream the required range. If File API doesn't expose seek, we skip bytes by reading and discarding.
+        var buffer: [65536]u8 = undefined;
+        var to_skip: u64 = start;
+        while (to_skip > 0) {
+            // compute a read length as usize (buffer.len is usize, to_skip is u64)
+            const read_len_usize = @min(buffer.len, @intCast(usize, to_skip));
+            var read_buf = [_][]u8{buffer[0..read_len_usize]};
+            const n = try std.Io.File.readStreaming(file, ctx.io, &read_buf);
+            if (n == 0) break;
+            // n is usize; to_skip is u64 -> cast n to u64 before subtracting
+            to_skip -= @intCast(u64, n);
+        }
+
+        var remaining: u64 = chunk_len;
+        while (remaining > 0) {
+            // compute a read length as usize (buffer.len is usize, remaining is u64)
+            const read_len_usize = @min(buffer.len, @intCast(usize, remaining));
+            var read_buf = [_][]u8{buffer[0..read_len_usize]};
+            const n = try std.Io.File.readStreaming(file, ctx.io, &read_buf);
+            if (n == 0) break;
+            try ctx.response.writeAll(buffer[0..n]);
+            // n is usize; remaining is u64 -> cast n to u64 before subtracting
+            remaining -= @intCast(u64, n);
+        }
+
+        return true;
     }
 
     /// Generate ETag for file
-    fn generateETag(file: std.Io.File, stat: std.Io.File.Stat) ![]const u8 {
-        // Simple ETag based on size and mtime
-        _ = file;
-        const etag = try std.fmt.allocPrint(std.heap.page_allocator, "\"{x}-{x}\"", .{ stat.mtime, stat.size });
+    fn generateETag(allocator: std.mem.Allocator, stat: std.Io.File.Stat) ![]const u8 {
+        // Simple ETag based on mtime and size (using server allocator so the caller can free)
+        const etag = try std.fmt.allocPrint(allocator, "\"{x}-{x}\"", .{ stat.mtime, stat.size });
         return etag;
     }
 

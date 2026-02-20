@@ -28,7 +28,13 @@ const IPFilter = @import("security.zig").IPFilter;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
+    defer {
+        const check = gpa.deinit();
+        if (check == .leak) {
+            std.log.err("Memory leak detected", .{});
+        }
+    }
+
     const allocator = gpa.allocator();
     var threaded = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer threaded.deinit();

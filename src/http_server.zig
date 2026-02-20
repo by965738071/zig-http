@@ -14,6 +14,84 @@ const Metrics = @import("monitoring.zig").Metrics;
 const ErrorHandler = @import("error_handler.zig").ErrorHandler;
 const Logger = @import("error_handler.zig").Logger;
 
+// Helper: read exactly `buf.len` bytes from a reader (returns number read or error)
+fn readExact(reader: anytype, buf: []u8) !usize {
+    var offset: usize = 0;
+    while (offset < buf.len) {
+        const n = try reader.readAll(buf[offset..]);
+        if (n == 0) return error.EndOfStream;
+        offset += n;
+    }
+    return offset;
+}
+
+// Helper: decode chunked transfer-encoding from reader and return an allocated buffer
+fn readChunkedBody(allocator: std.mem.Allocator, reader: anytype) ![]u8 {
+    var out = std.ArrayList(u8).init(allocator);
+    var one_byte: [1]u8 = undefined;
+    var line_buf = std.ArrayList(u8).init(allocator);
+
+    while (true) {
+        line_buf.clearRetainingCapacity();
+        // Read chunk size line (ends with CRLF)
+        while (true) {
+            const n = try reader.readAll(&one_byte);
+            if (n == 0) {
+                line_buf.deinit();
+                out.deinit();
+                return error.EndOfStream;
+            }
+            try line_buf.append(one_byte[0]);
+            const len = line_buf.items.len;
+            if (len >= 2 and line_buf.items[len - 2] == '\r' and line_buf.items[len - 1] == '\n') break;
+        }
+
+        const size_line = line_buf.toOwnedSlice(allocator) catch {
+            line_buf.deinit();
+            out.deinit();
+            return error.OutOfMemory;
+        };
+        defer allocator.free(size_line);
+
+        const trimmed = std.mem.trim(u8, size_line, &std.ascii.whitespace);
+        const semicolon_idx = std.mem.indexOfScalar(u8, trimmed, ';');
+        const size_str = if (semicolon_idx) |i| trimmed[0..i] else trimmed;
+        const chunk_size = std.fmt.parseInt(usize, size_str, 16) catch {
+            line_buf.deinit();
+            out.deinit();
+            return error.InvalidFormat;
+        };
+
+        if (chunk_size == 0) {
+            var crlf: [2]u8 = undefined;
+            _ = try reader.readAll(&crlf);
+            break;
+        }
+
+        var remaining: usize = chunk_size;
+        var tmp_buf: [4096]u8 = undefined;
+        while (remaining > 0) {
+            const to_read = @min(tmp_buf.len, remaining);
+            const n = try reader.readAll(tmp_buf[0..to_read]);
+            if (n == 0) {
+                line_buf.deinit();
+                out.deinit();
+                return error.EndOfStream;
+            }
+            try out.appendSlice(tmp_buf[0..n]);
+            remaining -= n;
+        }
+
+        var crlf2: [2]u8 = undefined;
+        _ = try reader.readAll(&crlf2);
+    }
+
+    line_buf.deinit();
+    const result = try out.toOwnedSlice(allocator);
+    out.deinit();
+    return result;
+}
+
 pub const HTTPServer = struct {
     allocator: std.mem.Allocator,
     io: Io,
@@ -247,19 +325,25 @@ fn handleConnection(server: *HTTPServer, stream: Io.net.Stream) void {
             // Normal connection close conditions
             if (err == error.EndOfStream or err == error.HttpConnectionClosing) break;
             if (err == error.ReadFailed) {
-                std.log.debug("Connection read failed (client may have closed connection): {}", .{err});
+                // 客户端可能已经优雅关闭或出现连接异常 —— 以 debug 级别记录并退出连接处理循环
+                std.log.debug("Connection read failed while waiting for request (client likely closed connection): {} (active_connections={d})", .{ err, server.getActiveConnections() });
                 break;
             }
             std.log.debug("Request head read error: {}", .{err});
             break;
         };
 
-        std.debug.print("Received: {s} {s}\n", .{ @tagName(request.head.method), request.head.target });
+        std.debug.print("Received: {s} {s} (keep-alive: {})\n", .{ @tagName(request.head.method), request.head.target, request.head.keep_alive });
 
         // Check for WebSocket upgrade before handling regular request
         if (server.ws_server) |ws_server| {
             const upgrade = request.upgradeRequested();
-            std.log.info("WebSocket upgrade check for {s}: {}", .{ request.head.target, upgrade });
+            const upgrade_str = switch (upgrade) {
+                .none => "none",
+                .websocket => "websocket",
+                else => "unknown",
+            };
+            std.log.info("WebSocket upgrade check for {s}: {s}", .{ request.head.target, upgrade_str });
 
             if (upgrade == .websocket) {
                 const sec_websocket_key = upgrade.websocket orelse {
@@ -326,19 +410,86 @@ fn handleConnection(server: *HTTPServer, stream: Io.net.Stream) void {
         }
 
         var body: []u8 = &.{};
-        if (content_length > 0) {
-            body = server.allocator.alloc(u8, content_length) catch |err| {
+        var body_owned: bool = false;
+
+        // Handle Expect: 100-continue if present
+        if (request.head.expect) |expect_val| {
+            if (std.ascii.eqlIgnoreCase(expect_val, "100-continue")) {
+                const w = &writer.interface;
+                // Send interim 100 Continue response
+                try w.writeAll("HTTP/1.1 100 Continue\r\n\r\n");
+            }
+        }
+
+        // If Transfer-Encoding: chunked, decode via helper; ownership transferred to context
+        if (request.head.transfer_encoding == .chunked) {
+            const conn_reader = reader.interface;
+            body = try readChunkedBody(server.allocator, conn_reader) catch |err| {
+                std.log.err("Failed to read chunked body: {}", .{err});
+                break;
+            };
+            body_owned = true;
+        } else if (content_length > 0) {
+            // Read fixed-length body
+            const len_usize = @intCast(usize, content_length);
+            var buf = try server.allocator.alloc(u8, len_usize) catch |err| {
                 std.log.err("Failed to allocate body buffer: {}", .{err});
                 break;
             };
-            errdefer server.allocator.free(body);
 
-            // Note: Body reading not fully implemented in 0.16
+            const conn_reader = reader.interface;
+            var total_read: usize = 0;
+            while (total_read < len_usize) {
+                const n = try conn_reader.readAll(buf[total_read..]);
+                if (n == 0) {
+                    server.allocator.free(buf);
+                    std.log.err("Failed to read request body: EndOfStream", .{});
+                    break;
+                }
+                total_read += n;
+            }
+            if (total_read != len_usize) {
+                // Incomplete read
+                server.allocator.free(buf);
+                std.log.err("Incomplete body read: expected {d}, got {d}", .{ len_usize, total_read });
+                break;
+            }
+
+            // Use the buffer as the body and mark ownership for Context to free
+            body = buf[0..len_usize];
+            body_owned = true;
+        } else {
+            // No body present
+            body_owned = false;
         }
-        defer if (body.len > 0) server.allocator.free(body);
 
-        // Handle request with body
-        if (handleRequest(server, &request, &writer)) |_| {
+        // Create response and context, attach body if present, then handle request
+        fn handleRequest(server: *HTTPServer, context: *Context, writer: anytype) !bool {
+            const request = context.request;
+            const response = context.response;
+
+        if (body.len > 0) {
+            // Transfer ownership/visibility of the body into the request context
+            context.body_data = body;
+            context.body_owned = body_owned;
+        }
+
+        // Handle request with body (context already prepared)
+        // Create response and context, attach body if present, then handle request
+        var response = try Response.init(server.allocator);
+        defer response.deinit();
+
+        var context = try Context.init(server.allocator, server, &request, &response, server.io);
+        defer context.deinit();
+
+        if (body.len > 0) {
+            // Transfer ownership/visibility of the body into the request context
+            context.body_data = body;
+            context.body_owned = body_owned;
+        }
+
+        // Handle request with body (context already prepared)
+        if (handleRequest(server, &context, &writer)) |_| {
             // Request handled successfully
         } else |err| {
             std.log.err("Error handling request: {}", .{err});
@@ -348,12 +499,9 @@ fn handleConnection(server: *HTTPServer, stream: Io.net.Stream) void {
     }
 }
 
-fn handleRequest(server: *HTTPServer, request: *http.Server.Request, writer: anytype) !bool {
-    var response = try Response.init(server.allocator);
-    defer response.deinit();
-
-    var context = try Context.init(server.allocator, server, request, &response, server.io);
-    defer context.deinit();
+fn handleRequest(server: *HTTPServer, context: *Context, writer: anytype) !bool {
+    const request = context.request;
+    const response = context.response;
 
     // Find route or check for static files
     const route = server.router.findRoute(request.head.method, request.head.target) catch |err| {

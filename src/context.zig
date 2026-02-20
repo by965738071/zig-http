@@ -19,8 +19,9 @@ pub const Context = struct {
     params: ParamList,
     state: std.StringHashMap(*anyopaque),
     body_parser: ?BodyParser,
-    body_data: ?[]const u8,
-    multipart_form: ?MultipartForm,
+    body_data: ?[]u8,
+    body_owned: bool = false,
+    multipart_form: ?*MultipartForm,
     cookie_jar: ?CookieJar,
     session: ?Session,
     allocator: std.mem.Allocator,
@@ -44,18 +45,35 @@ pub const Context = struct {
     }
 
     pub fn deinit(ctx: *Context) void {
+        // Deinit body parser if present
         if (ctx.body_parser) |*parser| {
             parser.deinit();
+            ctx.body_parser = null;
         }
-        if (ctx.multipart_form) |*form| {
-            form.deinit();
+
+        // If we stored a heap-allocated multipart form, deinit and destroy it
+        if (ctx.multipart_form) |form_ptr| {
+            form_ptr.deinit();
+            ctx.allocator.destroy(form_ptr);
+            ctx.multipart_form = null;
         }
+
+        // Free body data buffer if ownership was transferred here
+        if (ctx.body_data) |b| {
+            ctx.allocator.free(b);
+            ctx.body_data = null;
+        }
+
+        // Cookie jar and session are stored inline (if present) — deinit them
         if (ctx.cookie_jar) |*jar| {
             jar.deinit();
+            ctx.cookie_jar = null;
         }
         if (ctx.session) |*sess| {
             sess.deinit();
+            ctx.session = null;
         }
+
         ctx.params.deinit();
         ctx.state.deinit();
     }
@@ -177,7 +195,8 @@ pub const Context = struct {
 
     /// Get raw body data
     pub fn getBody(ctx: *Context) []const u8 {
-        return ctx.body_data orelse &.{};
+        if (ctx.body_data) |d| return @as([]const u8, d);
+        return &.{};
     }
 
     /// Get multipart form data
@@ -205,6 +224,9 @@ pub const Context = struct {
         // Store parsed form - we need a mutable reference
         const form_ptr = ctx.allocator.create(MultipartForm) catch return null;
         form_ptr.* = form;
+
+        // Transfer ownership into the context so it will be freed with ctx.deinit
+        ctx.multipart_form = form_ptr;
 
         return form_ptr;
     }
