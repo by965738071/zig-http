@@ -149,13 +149,42 @@ pub const WebSocketConnection = struct {
         return (now - last) < conn.ping_timeout;
     }
 
-    /// Close connection
+    /// Close connection with status code and optional reason
     pub fn close(conn: *WebSocketConnection, code: u16, reason: []const u8) !void {
         conn.closed.store(true, .monotonic);
 
-        // Send close frame
+        // Build close frame payload: [2-byte big-endian code][reason]
+        const payload_size = 2 + reason.len;
         conn.write_buffer.clearRetainingCapacity();
-        try conn.write_frame(reason, .close);
+
+        // Write frame header (FIN + close opcode)
+        const first_byte: u8 = 0x80 | 0x08;
+        try conn.write_buffer.append(conn.allocator, first_byte);
+
+        // Write payload length
+        if (payload_size < 126) {
+            try conn.write_buffer.append(conn.allocator, @as(u8, @intCast(payload_size)));
+        } else if (payload_size < 65536) {
+            try conn.write_buffer.append(conn.allocator, 126);
+            try conn.write_buffer.append(conn.allocator, @as(u8, @intCast(payload_size >> 8)));
+            try conn.write_buffer.append(conn.allocator, @as(u8, @intCast(payload_size & 0xff)));
+        } else {
+            return error.PayloadTooLarge;
+        }
+
+        // Write close code (big-endian)
+        try conn.write_buffer.append(conn.allocator, @as(u8, @intCast(code >> 8)));
+        try conn.write_buffer.append(conn.allocator, @as(u8, @intCast(code & 0xff)));
+
+        // Write reason if provided
+        if (reason.len > 0) {
+            try conn.write_buffer.appendSlice(conn.allocator, reason);
+        }
+
+        // Send frame
+        const w = conn.stream.writer(conn.io, &.{});
+        try w.writeAll(conn.write_buffer.items);
+        try w.flush();
 
         conn.stream.close(conn.io);
     }
@@ -328,9 +357,10 @@ pub const SubprotocolRegistry = struct {
         try registry.protocols.put(name_copy, version_copy orelse "");
     }
 
-    /// Negotiate subprotocol
-    pub fn negotiate(registry: SubprotocolRegistry, client_protocols: []const []const u8) ?[]const u8 {
-        var it = std.mem.splitScalar(u8, client_protocols, ',');
+    /// Negotiate subprotocol from client's Sec-WebSocket-Protocol header
+    /// client_protocols should be a comma-separated list of protocol names
+    pub fn negotiate(registry: SubprotocolRegistry, header_value: []const u8) ?[]const u8 {
+        var it = std.mem.splitScalar(u8, header_value, ',');
 
         while (it.next()) |proto| {
             const trimmed = std.mem.trim(u8, proto, &std.ascii.whitespace);

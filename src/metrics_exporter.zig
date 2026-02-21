@@ -14,7 +14,7 @@ pub const PrometheusExporter = struct {
     }
 
     /// Export metrics in Prometheus text format
-    pub fn export(exporter: *PrometheusExporter) ![]const u8 {
+    pub fn toPrometheus(exporter: *PrometheusExporter) ![]const u8 {
         var buffer = std.ArrayList(u8).init(exporter.allocator);
 
         // Export HTTP requests counter
@@ -48,6 +48,7 @@ pub const PrometheusExporter = struct {
     }
 
     fn appendHelp(exporter: *PrometheusExporter, buffer: *std.ArrayList(u8), name: []const u8, help: []const u8) !void {
+        _ = exporter;
         try buffer.writer().print("# HELP {s} {s}\n", .{ name, help });
         try buffer.writer().print("# TYPE {s} gauge\n", .{name});
     }
@@ -85,6 +86,7 @@ pub const PrometheusExporter = struct {
         // Export status code distribution
         // Note: This requires Metrics to track status codes separately
         // For now, export a placeholder
+        _ = exporter;
         try buffer.writer().print("http_response_status{{code=\"2xx\"}} 0\n", .{});
         try buffer.writer().print("http_response_status{{code=\"3xx\"}} 0\n", .{});
         try buffer.writer().print("http_response_status{{code=\"4xx\"}} 0\n", .{});
@@ -102,7 +104,7 @@ pub const MetricsHandler = struct {
 
     /// Serve metrics in Prometheus format
     pub fn serve(handler: *MetricsHandler, ctx: anytype) !void {
-        const metrics_data = try handler.exporter.export();
+        const metrics_data = try handler.exporter.toPrometheus();
         defer handler.exporter.allocator.free(metrics_data);
 
         try ctx.setHeader("Content-Type", "text/plain; version=0.0.4");

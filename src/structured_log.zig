@@ -17,12 +17,7 @@ pub const OutputFormat = enum {
     json,
 };
 
-pub const LogLevel = enum {
-    debug,
-    info,
-    warn,
-    err
-};
+pub const LogLevel = enum { debug, info, warn, err };
 
 /// Structured logger for HTTP requests
 pub const StructuredLogger = struct {
@@ -171,6 +166,7 @@ pub const ErrorLogger = struct {
     }
 
     pub fn logError(logger: *ErrorLogger, ctx: *Context, err: anyerror) !void {
+        _ = logger;
         var buffer = std.ArrayList(u8).init(ctx.allocator);
         defer buffer.deinit();
 
