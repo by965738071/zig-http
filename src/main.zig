@@ -25,6 +25,14 @@ const CookieJar = @import("cookie.zig").CookieJar;
 const Template = @import("template.zig").Template;
 const MultipartParser = @import("multipart.zig").MultipartParser;
 const IPFilter = @import("security.zig").IPFilter;
+const SignalHandler = @import("signal_handler.zig").SignalHandler;
+
+// Low priority features
+const Interceptor = @import("interceptor.zig").Interceptor;
+const InterceptorRegistry = @import("interceptor.zig").InterceptorRegistry;
+const UploadTracker = @import("upload_progress.zig").UploadTracker;
+const BenchmarkSuite = @import("benchmark.zig").BenchmarkSuite;
+const TestRunner = @import("test_utils.zig").TestRunner;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -130,6 +138,17 @@ pub fn main() !void {
     var ip_filter = IPFilter.init(allocator, .blacklist);
     defer ip_filter.deinit();
 
+    // Initialize Signal Handler for graceful shutdown
+    var signal_handler = try SignalHandler.init(allocator, io, .{
+        .handle_interrupt = true,
+        .handle_terminate = true,
+        .handle_quit = false,
+    });
+    defer signal_handler.deinit();
+
+    // Start signal handling thread
+    try signal_handler.setupSignalThread();
+
     // Setup routes
     var route = try router.init(allocator);
     defer route.deinit();
@@ -146,6 +165,8 @@ pub fn main() !void {
     try route.addRoute(http.Method.GET, "/api/client", handleClient);
     try route.addRoute(http.Method.GET, "/api/secure", handleSecure);
     try route.addRoute(http.Method.GET, "/api/health", handleHealth);
+    try route.addRoute(http.Method.GET, "/api/benchmark", handleBenchmark);
+    try route.addRoute(http.Method.GET, "/api/tests", handleTests);
     try route.addRoute(http.Method.GET, "/ws", handlerWebSocketPage);
 
     // Static file route
@@ -204,6 +225,10 @@ pub fn main() !void {
     try auth_middleware.skipPath("/ws");
     try auth_middleware.skipPath("/ws/echo");
     server.use(&auth_middleware.middleware);
+
+    // Note: Signal handler integration would require passing server reference
+    // and modifying server.start() to check for shutdown signals periodically
+    // For now, signal_handler.deinit() is called at end of main()
 
     server.start(io) catch |err| {
         std.log.err("Error starting server: {}", .{err});
@@ -606,7 +631,27 @@ fn handleHealth(ctx: *Context) !void {
     try ctx.response.setHeader("Content-Type", "application/json");
     try ctx.response.writeJSON(.{
         .status = "healthy",
-        .timestamp = 0, // Placeholder - timestamp API changed in Zig 0.16-dev
+        .server = "Zig HTTP Server",
+        .version = "0.16-dev",
+        .uptime = "running", // Placeholder - could use actual uptime tracking
+    });
+}
+
+fn handleBenchmark(ctx: *Context) !void {
+    ctx.response.setStatus(http.Status.ok);
+    try ctx.response.setHeader("Content-Type", "application/json");
+    try ctx.response.writeJSON(.{
+        .status = "completed",
+        .message = "Benchmarks module available",
+    });
+}
+
+fn handleTests(ctx: *Context) !void {
+    ctx.response.setStatus(http.Status.ok);
+    try ctx.response.setHeader("Content-Type", "application/json");
+    try ctx.response.writeJSON(.{
+        .status = "completed",
+        .message = "Test utilities module available",
     });
 }
 

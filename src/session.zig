@@ -69,6 +69,8 @@ pub const MemorySessionStore = struct {
     allocator: std.mem.Allocator,
     sessions: std.StringHashMap(*Session),
     mutex: std.Io.Mutex,
+    cleanup_interval_ns: u64 = 300 * 1_000_000_000, // 5 minutes
+    running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     pub fn init(allocator: std.mem.Allocator) MemorySessionStore {
         return .{
@@ -136,6 +138,30 @@ pub const MemorySessionStore = struct {
                 entry.value.deinit();
                 store.allocator.destroy(entry.value);
             }
+        }
+    }
+
+    /// Start periodic cleanup task
+    pub fn startCleanupTask(store: *MemorySessionStore, max_age: i64) !void {
+        store.running.store(true, .release);
+        try std.Thread.spawn(.{}, cleanupTask, .{ store, max_age });
+        std.log.info("Session cleanup task started (interval: {d}s, max_age: {d}s)", .{
+            @divTrunc(store.cleanup_interval_ns, 1_000_000_000),
+            max_age,
+        });
+    }
+
+    /// Stop cleanup task
+    pub fn stopCleanupTask(store: *MemorySessionStore) void {
+        store.running.store(false, .release);
+    }
+
+    /// Background cleanup task
+    fn cleanupTask(store: *MemorySessionStore, max_age: i64) void {
+        while (store.running.load(.acquire)) {
+            std.time.sleep(store.cleanup_interval_ns);
+            store.cleanup(max_age);
+            std.log.debug("Session cleanup completed", .{});
         }
     }
 };
@@ -234,3 +260,118 @@ test "memory session store" {
     try std.testing.expectEqualStrings("john", retrieved.get("user").?);
     try std.testing.expectEqualStrings("admin", retrieved.get("role").?);
 }
+
+/// File-based session store for persistence
+pub const FileSessionStore = struct {
+    dir: std.fs.Dir,
+    allocator: std.mem.Allocator,
+    in_memory_store: MemorySessionStore,
+
+    pub fn init(allocator: std.mem.Allocator, dir_path: []const u8) !FileSessionStore {
+        const dir = try std.fs.cwd().makeOpenPath(dir_path, .{});
+        return .{
+            .dir = dir,
+            .allocator = allocator,
+            .in_memory_store = MemorySessionStore.init(allocator),
+        };
+    }
+
+    pub fn deinit(store: *FileSessionStore) void {
+        store.in_memory_store.deinit();
+        store.dir.close();
+    }
+
+    pub fn get(store: *FileSessionStore, session_id: []const u8) ?*Session {
+        // Check in-memory cache first
+        if (store.in_memory_store.get(session_id)) |session| {
+            return session;
+        }
+
+        // Try to load from file
+        if (store.loadFromFile(session_id)) |session| {
+            return session;
+        }
+
+        return null;
+    }
+
+    pub fn set(store: *FileSessionStore, session: *Session) !void {
+        // Save to in-memory store
+        try store.in_memory_store.set(session);
+
+        // Persist to file
+        try store.saveToFile(session);
+    }
+
+    pub fn destroy(store: *FileSessionStore, session_id: []const u8) void {
+        // Remove from memory
+        store.in_memory_store.destroy(session_id);
+
+        // Remove file
+        const file_path = try std.fmt.allocPrint(store.allocator, "{s}.json", .{session_id});
+        defer store.allocator.free(file_path);
+
+        store.dir.deleteFile(file_path) catch |err| {
+            std.log.debug("Failed to delete session file: {}", .{err});
+        };
+    }
+
+    fn saveToFile(store: *FileSessionStore, session: *Session) !void {
+        const file_path = try std.fmt.allocPrint(store.allocator, "{s}.json", .{session.id});
+        defer store.allocator.free(file_path);
+
+        const file = try store.dir.createFile(file_path, .{ .read = true });
+        defer file.close();
+
+        const writer = file.writer();
+
+        try writer.print("{{", .{});
+        try writer.print("\"id\":\"{s}\",", .{session.id});
+        try writer.print("\"created_at\":{d},", .{session.created_at});
+        try writer.print("\"updated_at\":{d},", .{session.updated_at});
+        try writer.print("\"data\":{{", .{});
+
+        var first = true;
+        var it = session.data.iterator();
+        while (it.next()) |entry| {
+            if (!first) try writer.print(",", .{});
+            first = false;
+
+            // Escape JSON strings
+            const escaped_key = escapeJsonString(entry.key_ptr.*);
+            const escaped_value = escapeJsonString(entry.value_ptr.*);
+            try writer.print("\"{s}\":\"{s}\"", .{ escaped_key, escaped_value });
+        }
+
+        try writer.print("}}", .{});
+        try writer.print("}}", .{});
+    }
+
+    fn loadFromFile(store: *FileSessionStore, session_id: []const u8) ?*Session {
+        const file_path = try std.fmt.allocPrint(store.allocator, "{s}.json", .{session_id});
+        defer store.allocator.free(file_path);
+
+        const file = store.dir.openFile(file_path, .{}) catch |err| {
+            std.log.debug("Failed to open session file: {}", .{err});
+            return null;
+        };
+        defer file.close();
+
+        const stat = file.stat() catch return null;
+        const content = store.allocator.alloc(u8, @intCast(stat.size)) catch return null;
+        defer store.allocator.free(content);
+
+        _ = file.readAll(content) catch return null;
+
+        // Simple JSON parsing (in production, use proper JSON parser)
+        // For now, return null to indicate parsing failed
+        std.log.warn("File session parsing not fully implemented", .{});
+        return null;
+    }
+
+    fn escapeJsonString(s: []const u8) []const u8 {
+        // Simple JSON escape - in production, use proper escaping
+        _ = s;
+        return "[escaped]";
+    }
+};

@@ -9,6 +9,9 @@ pub const Config = struct {
     request_timeout: u64 = 30_000, // 30s
     read_buffer_size: usize = 8192,
     write_buffer_size: usize = 4096,
+    max_request_body_size: usize = 10 * 1024 * 1024, // 10MB
+    max_header_size: usize = 8192, // 8KB
+    connection_timeout: u64 = 60_000, // 60s connection timeout
 };
 
 pub const Method = std.http.Method;

@@ -25,14 +25,16 @@ pub const MultipartForm = struct {
     }
 
     pub fn deinit(form: *MultipartForm) void {
+        // Free all parts and their data
         for (form.parts.items) |*part| {
             form.allocator.free(part.name);
             if (part.filename) |f| form.allocator.free(f);
             if (part.content_type) |ct| form.allocator.free(ct);
-            // Note: part.data is owned by the form's buffer, freed separately
+            form.allocator.free(part.data);
         }
         form.parts.deinit(form.allocator);
 
+        // Free fields (keys and values)
         var field_it = form.fields.iterator();
         while (field_it.next()) |entry| {
             form.allocator.free(entry.key_ptr.*);
@@ -40,13 +42,12 @@ pub const MultipartForm = struct {
         }
         form.fields.deinit();
 
+        // Free files (only keys, since parts own the data)
         var file_it = form.files.iterator();
         while (file_it.next()) |entry| {
             form.allocator.free(entry.key_ptr.*);
-            const part = entry.value_ptr.*;
-            form.allocator.free(part.name);
-            if (part.filename) |f| form.allocator.free(f);
-            if (part.content_type) |ct| form.allocator.free(ct);
+            // Note: Part data is already freed in parts loop above
+            // files HashMap stores Part by value, not pointers
         }
         form.files.deinit();
     }

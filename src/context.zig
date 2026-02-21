@@ -11,6 +11,7 @@ const CookieJar = @import("cookie.zig").CookieJar;
 const Cookie = @import("cookie.zig").Cookie;
 const Session = @import("session.zig").Session;
 const SessionManager = @import("session.zig").SessionManager;
+const utils = @import("utils.zig");
 
 pub const Context = struct {
     server: *HTTPServer,
@@ -20,14 +21,18 @@ pub const Context = struct {
     state: std.StringHashMap(*anyopaque),
     body_parser: ?BodyParser,
     body_data: ?[]u8,
-    body_owned: bool = false,
     multipart_form: ?*MultipartForm,
     cookie_jar: ?CookieJar,
     session: ?Session,
     allocator: std.mem.Allocator,
     io: std.Io,
+    request_id: ?[]const u8,
 
     pub fn init(allocator: std.mem.Allocator, server: *HTTPServer, request: *http.Server.Request, response: *Response, io: std.Io) !Context {
+        const request_id = utils.generateRequestId(allocator, io) catch |gen_err| blk: {
+            std.log.warn("Failed to generate request ID: {}", .{gen_err});
+            break :blk try allocator.dupe(u8, "unknown");
+        };
         return .{
             .server = server,
             .request = request,
@@ -41,6 +46,7 @@ pub const Context = struct {
             .session = null,
             .allocator = allocator,
             .io = io,
+            .request_id = request_id,
         };
     }
 
@@ -64,6 +70,12 @@ pub const Context = struct {
             ctx.body_data = null;
         }
 
+        // Free request ID if allocated
+        if (ctx.request_id) |rid| {
+            ctx.allocator.free(rid);
+            ctx.request_id = null;
+        }
+
         // Cookie jar and session are stored inline (if present) — deinit them
         if (ctx.cookie_jar) |*jar| {
             jar.deinit();
@@ -76,6 +88,11 @@ pub const Context = struct {
 
         ctx.params.deinit();
         ctx.state.deinit();
+    }
+
+    /// Get request ID for tracing
+    pub fn getRequestId(ctx: Context) ?[]const u8 {
+        return ctx.request_id;
     }
 
     pub fn getParam(ctx: Context, name: []const u8) ?[]const u8 {
@@ -215,11 +232,17 @@ pub const Context = struct {
         const data = ctx.getBody();
         if (data.len == 0) return null;
 
-        const boundary = MultipartParser.extractBoundary(content_type) catch return null;
+        const boundary = MultipartParser.extractBoundary(content_type) catch |parse_err| {
+            std.log.warn("Failed to extract multipart boundary: {}", .{parse_err});
+            return null;
+        };
         var parser = MultipartParser.init(ctx.allocator, boundary);
         defer parser.deinit();
 
-        const form = parser.parse(data) catch return null;
+        const form = parser.parse(data) catch |parse_err| {
+            std.log.warn("Failed to parse multipart form data: {}", .{parse_err});
+            return null;
+        };
 
         // Store parsed form - we need a mutable reference
         const form_ptr = ctx.allocator.create(MultipartForm) catch return null;
@@ -248,7 +271,9 @@ pub const Context = struct {
         if (ctx.cookie_jar == null) {
             var jar = CookieJar.init(ctx.allocator);
             if (ctx.getHeader("Cookie")) |cookie_header| {
-                jar.parse(cookie_header) catch {};
+                jar.parse(cookie_header) catch |parse_err| {
+                    std.log.warn("Failed to parse cookie header: {}", .{parse_err});
+                };
             }
             ctx.cookie_jar = jar;
         }

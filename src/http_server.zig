@@ -13,12 +13,18 @@ const RateLimiter = @import("rate_limiter.zig").RateLimiter;
 const Metrics = @import("monitoring.zig").Metrics;
 const ErrorHandler = @import("error_handler.zig").ErrorHandler;
 const Logger = @import("error_handler.zig").Logger;
+const WebSocketServer = @import("websocket.zig").WebSocketServer;
+
 
 // Helper: read exactly `buf.len` bytes from a reader (returns number read or error)
+// Use Reader vtable's readVec when available (0.16 reader API).
 fn readExact(reader: anytype, buf: []u8) !usize {
     var offset: usize = 0;
     while (offset < buf.len) {
-        const n = try reader.readAll(buf[offset..]);
+        const slice = buf[offset..];
+        // Call into vtable.readVec if available. `reader` is expected to be a pointer-like
+        // object with a `.vtable.readVec` method in std 0.16.
+        const n = try reader.readAll(slice);
         if (n == 0) return error.EndOfStream;
         offset += n;
     }
@@ -26,29 +32,33 @@ fn readExact(reader: anytype, buf: []u8) !usize {
 }
 
 // Helper: decode chunked transfer-encoding from reader and return an allocated buffer
-fn readChunkedBody(allocator: std.mem.Allocator, reader: anytype) ![]u8 {
-    var out = std.ArrayList(u8).init(allocator);
+// This version uses Reader.readVec (0.16 API) to read into slices.
+fn readChunkedBody(allocator: std.mem.Allocator, reader: *std.Io.Reader) ![]u8 {
+    var out = std.ArrayList(u8){};
     var one_byte: [1]u8 = undefined;
-    var line_buf = std.ArrayList(u8).init(allocator);
+    var one_byte_slice: [1][]u8 = undefined;
+    var line_buf = std.ArrayList(u8){};
 
     while (true) {
         line_buf.clearRetainingCapacity();
         // Read chunk size line (ends with CRLF)
         while (true) {
-            const n = try reader.readAll(&one_byte);
+            // read a single byte via readVec into a 1-element slice
+            one_byte_slice[0] = &one_byte;
+            const n = try reader.readVec(&one_byte_slice);
             if (n == 0) {
-                line_buf.deinit();
-                out.deinit();
+                line_buf.deinit(allocator);
+                out.deinit(allocator);
                 return error.EndOfStream;
             }
-            try line_buf.append(one_byte[0]);
+            try line_buf.append(allocator, one_byte[0]);
             const len = line_buf.items.len;
             if (len >= 2 and line_buf.items[len - 2] == '\r' and line_buf.items[len - 1] == '\n') break;
         }
 
         const size_line = line_buf.toOwnedSlice(allocator) catch {
-            line_buf.deinit();
-            out.deinit();
+            line_buf.deinit(allocator);
+            out.deinit(allocator);
             return error.OutOfMemory;
         };
         defer allocator.free(size_line);
@@ -57,38 +67,38 @@ fn readChunkedBody(allocator: std.mem.Allocator, reader: anytype) ![]u8 {
         const semicolon_idx = std.mem.indexOfScalar(u8, trimmed, ';');
         const size_str = if (semicolon_idx) |i| trimmed[0..i] else trimmed;
         const chunk_size = std.fmt.parseInt(usize, size_str, 16) catch {
-            line_buf.deinit();
-            out.deinit();
+            line_buf.deinit(allocator);
+            out.deinit(allocator);
             return error.InvalidFormat;
         };
 
         if (chunk_size == 0) {
             var crlf: [2]u8 = undefined;
-            _ = try reader.readAll(&crlf);
+            try reader.readSliceAll(&crlf);
             break;
         }
 
         var remaining: usize = chunk_size;
         var tmp_buf: [4096]u8 = undefined;
         while (remaining > 0) {
-            const to_read = @min(tmp_buf.len, remaining);
-            const n = try reader.readAll(tmp_buf[0..to_read]);
+            const to_read = if (tmp_buf.len < remaining) tmp_buf.len else remaining;
+            const n = try reader.readSliceShort(tmp_buf[0..to_read]);
             if (n == 0) {
-                line_buf.deinit();
-                out.deinit();
+                line_buf.deinit(allocator);
+                out.deinit(allocator);
                 return error.EndOfStream;
             }
-            try out.appendSlice(tmp_buf[0..n]);
+            try out.appendSlice(allocator, tmp_buf[0..n]);
             remaining -= n;
         }
 
         var crlf2: [2]u8 = undefined;
-        _ = try reader.readAll(&crlf2);
+        try reader.readSliceAll(&crlf2);
     }
 
-    line_buf.deinit();
+    line_buf.deinit(allocator);
     const result = try out.toOwnedSlice(allocator);
-    out.deinit();
+    out.deinit(allocator);
     return result;
 }
 
@@ -109,8 +119,7 @@ pub const HTTPServer = struct {
     error_handler: ?*ErrorHandler = null,
     logger: ?*Logger = null,
 
-    const WebSocketServer = @import("websocket.zig").WebSocketServer;
-
+   
     pub fn init(allocator: std.mem.Allocator, config: Config) !HTTPServer {
         return .{
             .allocator = allocator,
@@ -319,8 +328,19 @@ fn handleConnection(server: *HTTPServer, stream: Io.net.Stream) void {
     var writer = stream.writer(io, &write_buffer);
     var http_server_struct = http.Server.init(&reader.interface, &writer.interface);
 
+    // Track connection start time for timeout
+    const connection_start = std.Io.Timestamp.now(io, .boot);
+
     // Keep-Alive loop
     while (!server.isShuttingDown()) {
+        // Check connection timeout
+        const elapsed_ns = std.Io.Timestamp.now(io, .boot).toNanoseconds() - connection_start.toNanoseconds();
+        const timeout_ns: i96 = @intCast(server.config.connection_timeout * 1_000_000); // Convert ms to ns
+        if (elapsed_ns > timeout_ns) {
+            const elapsed_ms = @divTrunc(elapsed_ns, 1_000_000);
+            std.log.debug("Connection timeout after {d}ms", .{elapsed_ms});
+            break;
+        }
         var request = http_server_struct.receiveHead() catch |err| {
             // Normal connection close conditions
             if (err == error.EndOfStream or err == error.HttpConnectionClosing) break;
@@ -394,16 +414,26 @@ fn handleConnection(server: *HTTPServer, stream: Io.net.Stream) void {
         // Read request body if present
         const content_length = if (request.head.content_length) |len| len else 0;
 
-        // Enforce maximum request body size (10MB default)
-        const max_body_size = 10 * 1024 * 1024;
+        // Enforce maximum request body size from config (default 10MB)
+        const max_body_size = server.config.max_request_body_size;
         if (content_length > max_body_size) {
             std.log.warn("Request body exceeds maximum size: {d} > {d}", .{ content_length, max_body_size });
-            var response = try Response.init(server.allocator);
+            var response = Response.init(server.allocator) catch {
+                // If response init fails, send minimal error response
+                const w = &writer.interface;
+                w.writeAll("HTTP/1.1 413 Payload Too Large\r\n\r\n") catch {};
+                w.flush() catch {};
+                break;
+            };
             defer response.deinit();
             response.setStatus(.payload_too_large);
-            response.writeJSON(.{ .error_val = "Request body too large" }) catch {};
+            response.writeJSON(.{ .error_val = "Request body too large", .max_size = max_body_size }) catch {};
 
-            var ctx_tmp = try Context.init(server.allocator, server, &request, &response, server.io);
+            var ctx_tmp = Context.init(server.allocator, server, &request, &response, server.io) catch {
+                // If context init fails, still send response
+                response.toHttpResponse(&writer, &request) catch {};
+                break;
+            };
             defer ctx_tmp.deinit();
             response.toHttpResponse(&writer, &request) catch {};
             break;
@@ -417,30 +447,37 @@ fn handleConnection(server: *HTTPServer, stream: Io.net.Stream) void {
             if (std.ascii.eqlIgnoreCase(expect_val, "100-continue")) {
                 const w = &writer.interface;
                 // Send interim 100 Continue response
-                try w.writeAll("HTTP/1.1 100 Continue\r\n\r\n");
+                w.writeAll("HTTP/1.1 100 Continue\r\n\r\n") catch |err| {
+                    std.log.err("Failed to write `HTTP/1.1 100 Continue\r\n\r\n reason: {s}`", .{@errorName(err)});
+                };
             }
         }
 
         // If Transfer-Encoding: chunked, decode via helper; ownership transferred to context
         if (request.head.transfer_encoding == .chunked) {
-            const conn_reader = reader.interface;
-            body = try readChunkedBody(server.allocator, conn_reader) catch |err| {
+            body = readChunkedBody(server.allocator, &reader.interface) catch |err| {
                 std.log.err("Failed to read chunked body: {}", .{err});
                 break;
             };
             body_owned = true;
         } else if (content_length > 0) {
             // Read fixed-length body
-            const len_usize = @intCast(usize, content_length);
-            var buf = try server.allocator.alloc(u8, len_usize) catch |err| {
+            const len_usize: usize = @intCast(content_length);
+            var buf = server.allocator.alloc(u8, len_usize) catch |err| {
                 std.log.err("Failed to allocate body buffer: {}", .{err});
                 break;
             };
 
-            const conn_reader = reader.interface;
+            const conn_reader = &reader.interface;
             var total_read: usize = 0;
             while (total_read < len_usize) {
-                const n = try conn_reader.readAll(buf[total_read..]);
+                // Use the Reader vtable readVec to obtain bytes into the destination slice
+                const slice = buf[total_read..];
+                const n = conn_reader.readSliceShort(slice) catch |err| {
+                    server.allocator.free(buf);
+                    std.log.err("Failed to read request body: {}", .{err});
+                    break;
+                };
                 if (n == 0) {
                     server.allocator.free(buf);
                     std.log.err("Failed to read request body: EndOfStream", .{});
@@ -464,31 +501,35 @@ fn handleConnection(server: *HTTPServer, stream: Io.net.Stream) void {
         }
 
         // Create response and context, attach body if present, then handle request
-        fn handleRequest(server: *HTTPServer, context: *Context, writer: anytype) !bool {
-            const request = context.request;
-            const response = context.response;
-
-        if (body.len > 0) {
-            // Transfer ownership/visibility of the body into the request context
-            context.body_data = body;
-            context.body_owned = body_owned;
-        }
-
-        // Handle request with body (context already prepared)
-        // Create response and context, attach body if present, then handle request
-        var response = try Response.init(server.allocator);
+        var response = Response.init(server.allocator) catch {
+            // If response init fails, we can't continue
+            break;
+        };
         defer response.deinit();
 
-        var context = try Context.init(server.allocator, server, &request, &response, server.io);
+        var context = Context.init(server.allocator, server, &request, &response, server.io) catch {
+            // If context init fails, we can't continue
+            break;
+        };
         defer context.deinit();
 
-        if (body.len > 0) {
-            // Transfer ownership/visibility of the body into the request context
+        if (body.len > 0 and body_owned) {
+            // Transfer ownership of the body into the request context
+            // context.deinit() will free the body
             context.body_data = body;
-            context.body_owned = body_owned;
+            body_owned = false; // Ownership transferred to context
+        } else if (!body_owned) {
+            // No body or body is not owned (empty slice), nothing to free
+            context.body_data = null;
         }
 
-        // Handle request with body (context already prepared)
+        // Clean up body if still owned (shouldn't happen, but just in case)
+        if (body_owned and body.len > 0) {
+            server.allocator.free(body);
+            body_owned = false;
+        }
+
+        // Call top-level handleRequest to process the request
         if (handleRequest(server, &context, &writer)) |_| {
             // Request handled successfully
         } else |err| {
@@ -503,6 +544,19 @@ fn handleRequest(server: *HTTPServer, context: *Context, writer: anytype) !bool 
     const request = context.request;
     const response = context.response;
 
+    // Check rate limit if configured
+    // Note: Using request path as key since client IP is not available in request.head
+    // In production, you'd want to track actual client IP from TCP connection
+    if (server.rate_limiter) |limiter| {
+        const key = request.head.target; // Use target path as rate limit key
+        if (!limiter.isAllowed(key)) {
+            context.setStatus(http.Status.too_many_requests);
+            try context.json(.{ .error_val = "Rate limit exceeded", .retry_after = 60 });
+            try response.toHttpResponse(writer, request);
+            return true;
+        }
+    }
+
     // Find route or check for static files
     const route = server.router.findRoute(request.head.method, request.head.target) catch |err| {
         std.log.err("Error finding route: {}", .{err});
@@ -514,7 +568,7 @@ fn handleRequest(server: *HTTPServer, context: *Context, writer: anytype) !bool 
         // Check if static file server is configured
         if (server.static_server) |static_srv| {
             if (request.head.method == http.Method.GET and
-                static_srv.handle(&context) catch |err| {
+                static_srv.handle(context) catch |err| {
                     std.log.err("Static file error: {}", .{err});
                     context.setStatus(http.Status.internal_server_error);
                     try context.json(.{ .error_val = "Internal server error" });
@@ -534,7 +588,7 @@ fn handleRequest(server: *HTTPServer, context: *Context, writer: anytype) !bool 
 
     // Execute global middlewares
     for (server.middlewares.items) |middleware| {
-        const action = try middleware.vtable.process(middleware, &context, server.io);
+        const action = try middleware.vtable.process(middleware, context, server.io);
         switch (action) {
             .@"continue" => continue,
             .respond, .err => {
@@ -546,7 +600,7 @@ fn handleRequest(server: *HTTPServer, context: *Context, writer: anytype) !bool 
 
     // Execute route middlewares
     for (route.middlewares) |middleware| {
-        const action = try middleware.vtable.process(middleware, &context, server.io);
+        const action = try middleware.vtable.process(middleware, context, server.io);
         switch (action) {
             .@"continue" => continue,
             .respond, .err => {
@@ -557,7 +611,7 @@ fn handleRequest(server: *HTTPServer, context: *Context, writer: anytype) !bool 
     }
 
     // Execute handler
-    route.handler(&context) catch |err| {
+    route.handler(context) catch |err| {
         std.log.err("Handler error: {}", .{err});
         context.setStatus(http.Status.internal_server_error);
         try context.json(.{ .error_val = "Internal server error" });

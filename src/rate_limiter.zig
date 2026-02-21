@@ -20,21 +20,16 @@ pub const RateLimiter = struct {
     config: RateLimiterConfig,
     last_cleanup: i64,
     mutex: std.Io.Mutex,
+    io: std.Io,
 
     pub fn init(allocator: std.mem.Allocator, config: RateLimiterConfig, io: std.Io) RateLimiter {
         return .{
             .allocator = allocator,
             .clients = std.StringHashMap(RateLimiterEntry).init(allocator),
             .config = config,
-
             .last_cleanup = std.Io.Timestamp.now(io, .boot).toMilliseconds(),
             .mutex = std.Io.Mutex.init,
-            // .last_cleanup = blk: {
-            //     const now = std.time
-            //     const now = std.time.Instant.now() catch unreachable;
-            //     break :blk now.timestamp * 1000; // Convert to ms
-            // },
-            // .mutex = .{},
+            .io = io,
         };
     }
 
@@ -44,10 +39,10 @@ pub const RateLimiter = struct {
 
     /// Check if request is allowed
     pub fn isAllowed(limiter: *RateLimiter, client_id: []const u8) bool {
-        limiter.mutex.lock();
-        defer limiter.mutex.unlock();
+        limiter.mutex.lock(limiter.io) catch return false;
+        defer limiter.mutex.unlock(limiter.io);
 
-        const now = std.time.timestamp() * 1000; // Convert to ms
+        const now = std.Io.Timestamp.now(limiter.io, .boot).toMilliseconds();
 
         // Periodic cleanup
         if (now - limiter.last_cleanup > limiter.config.cleanup_interval) {
@@ -83,15 +78,15 @@ pub const RateLimiter = struct {
 
     /// Reset rate limit for client
     pub fn reset(limiter: *RateLimiter, client_id: []const u8) void {
-        limiter.mutex.lock();
-        defer limiter.mutex.unlock();
+        limiter.mutex.lock(limiter.io) catch {};
+        defer limiter.mutex.unlock(limiter.io);
         _ = limiter.clients.remove(client_id);
     }
 
     /// Get remaining requests for client
     pub fn getRemaining(limiter: *RateLimiter, client_id: []const u8) u64 {
-        limiter.mutex.lock();
-        defer limiter.mutex.unlock();
+        limiter.mutex.lock(limiter.io) catch return 0;
+        defer limiter.mutex.unlock(limiter.io);
 
         const entry = limiter.clients.get(client_id) orelse return limiter.config.max_requests;
         return limiter.config.max_requests - entry.count;
@@ -99,16 +94,16 @@ pub const RateLimiter = struct {
 
     /// Clean up expired entries
     fn cleanup(limiter: *RateLimiter, now_ms: i64) void {
-        var keys = std.ArrayList([]const u8).init(limiter.allocator);
+        var keys = std.ArrayList([]const u8).empty;
         defer {
             for (keys.items) |k| limiter.allocator.free(k);
-            keys.deinit();
+            keys.deinit(limiter.allocator);
         }
 
         var it = limiter.clients.iterator();
         while (it.next()) |entry| {
             if (now_ms - entry.value_ptr.window_start >= limiter.config.window_ms) {
-                keys.append(entry.key_ptr.*) catch {};
+                keys.append(limiter.allocator, entry.key_ptr.*) catch {};
             }
         }
 
@@ -120,7 +115,7 @@ pub const RateLimiter = struct {
 
 test "rate limiter" {
     const allocator = std.testing.allocator;
-    var limiter = RateLimiter.init(allocator, .{ .max_requests = 5, .window_ms = 1000 });
+    var limiter = RateLimiter.init(allocator, .{ .max_requests = 5, .window_ms = 1000 }, std.testing.io_instance);
     defer limiter.deinit();
 
     // Should allow first 5 requests

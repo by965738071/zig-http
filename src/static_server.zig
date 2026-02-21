@@ -139,12 +139,21 @@ pub const StaticServer = struct {
         // Get MIME type
         const mime = server.getMimeType(file_path);
 
-        // Set headers
+        // Set cache headers
         if (server.config.enable_cache) {
             try ctx.response.setHeader("Cache-Control", "public, max-age=3600");
             const etag = try generateETag(server.allocator, stat);
             defer server.allocator.free(etag);
             try ctx.response.setHeader("ETag", etag);
+
+            // Check If-None-Match for conditional GET (304 Not Modified)
+            const if_none_match = ctx.getHeader("If-None-Match");
+            if (if_none_match != null) {
+                if (mem.eql(u8, if_none_match.?, etag)) {
+                    ctx.response.setStatus(http.Status.not_modified);
+                    return true;
+                }
+            }
         }
 
         try ctx.response.setHeader("Content-Type", mime);
@@ -158,16 +167,32 @@ pub const StaticServer = struct {
             }
         }
 
-        // Read and send file using Io.File.Reader
+        // Check if compression is supported and file is compressible
+        const accept_encoding = ctx.getHeader("Accept-Encoding");
+        const should_compress = accept_encoding != null and
+            mem.indexOf(u8, accept_encoding.?, "gzip") != null and
+            isCompressibleType(mime);
+
+        if (should_compress and size > 1024) {
+            // Serve compressed file
+            if (try serveCompressedFile(server, ctx, file, file_path, mime, size)) {
+                return true;
+            }
+        }
+
+        // Read and send file using File.reader (std.Io 0.16 API)
         var buffer: [65536]u8 = undefined; // 64KB buffer
+        var file_reader = file.reader(ctx.io, &buffer).interface;
         var bytes_read: u64 = 0;
         while (bytes_read < size) {
-            const to_read = @min(buffer.len, size - bytes_read);
-            var read_buf = [_][]u8{buffer[0..to_read]};
-            const n = try std.Io.File.readStreaming(file, ctx.io, &read_buf);
-            //const n = try ctx.io.vtable.fileReadStreaming(ctx.io.userdata, file, &read_buf);
+            const remaining = size - bytes_read;
+            const to_read: usize = if (buffer.len < remaining) buffer.len else @intCast(remaining);
+            const slice = buffer[0..to_read];
+            var bufs: [1][]u8 = .{slice};
+            const n = try (&file_reader).* .vtable.readVec(&file_reader, &bufs);
+            if (n == 0) break;
             try ctx.response.writeAll(buffer[0..n]);
-            bytes_read += n;
+            bytes_read += @intCast(n);
         }
 
         return true;
@@ -175,6 +200,8 @@ pub const StaticServer = struct {
 
     /// Handle Range request for partial content
     fn handleRangeRequest(server: *StaticServer, ctx: *Context, file: std.Io.File, file_path: []const u8, size: u64, range_str: []const u8) !bool {
+        _ = server;
+        _ = file_path;
         // Only support simple single-range of the form: bytes=start-end
         if (!mem.startsWith(u8, range_str, "bytes=")) return false;
 
@@ -220,27 +247,30 @@ pub const StaticServer = struct {
 
         // Stream the required range. If File API doesn't expose seek, we skip bytes by reading and discarding.
         var buffer: [65536]u8 = undefined;
-        var to_skip: u64 = start;
+        var file_reader = file.reader(ctx.io, &buffer).interface;
+
+        var to_skip: u64 = @intCast(start);
         while (to_skip > 0) {
-            // compute a read length as usize (buffer.len is usize, to_skip is u64)
-            const read_len_usize = @min(buffer.len, @intCast(usize, to_skip));
-            var read_buf = [_][]u8{buffer[0..read_len_usize]};
-            const n = try std.Io.File.readStreaming(file, ctx.io, &read_buf);
+            const read_len: usize = if (buffer.len < to_skip) buffer.len else @intCast(start);
+            var bufs: [1][]u8 = .{buffer[0..read_len]};
+            const n = try (&file_reader).* .vtable.readVec(&file_reader, &bufs);
             if (n == 0) break;
-            // n is usize; to_skip is u64 -> cast n to u64 before subtracting
-            to_skip -= @intCast(u64, n);
+            to_skip -= @intCast(n);
         }
 
         var remaining: u64 = chunk_len;
         while (remaining > 0) {
             // compute a read length as usize (buffer.len is usize, remaining is u64)
-            const read_len_usize = @min(buffer.len, @intCast(usize, remaining));
-            var read_buf = [_][]u8{buffer[0..read_len_usize]};
-            const n = try std.Io.File.readStreaming(file, ctx.io, &read_buf);
+            //
+            const remaing_cast: usize = @intCast(remaining);
+
+            const read_len: usize = if (buffer.len < remaing_cast) buffer.len else remaing_cast;
+            var bufs: [1][]u8 = .{buffer[0..read_len]};
+            const n = try (&file_reader).* .vtable.readVec(&file_reader, &bufs);
             if (n == 0) break;
             try ctx.response.writeAll(buffer[0..n]);
             // n is usize; remaining is u64 -> cast n to u64 before subtracting
-            remaining -= @intCast(u64, n);
+            remaining -= @intCast(n);
         }
 
         return true;
@@ -251,6 +281,60 @@ pub const StaticServer = struct {
         // Simple ETag based on mtime and size (using server allocator so the caller can free)
         const etag = try std.fmt.allocPrint(allocator, "\"{x}-{x}\"", .{ stat.mtime, stat.size });
         return etag;
+    }
+
+    /// Check if MIME type is compressible
+    fn isCompressibleType(mime: []const u8) bool {
+        const compressible_types = [_][]const u8{
+            "text/html",
+            "text/plain",
+            "text/css",
+            "text/javascript",
+            "application/javascript",
+            "application/json",
+            "application/xml",
+            "text/xml",
+            "application/xhtml+xml",
+        };
+
+        for (compressible_types) |compressible| {
+            if (mem.startsWith(u8, mime, compressible)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Serve compressed file (placeholder - requires real compression implementation)
+    fn serveCompressedFile(server: *StaticServer, ctx: *Context, file: std.Io.File, file_path: []const u8, mime: []const u8, size: u64) !bool {
+        // TODO: Implement real gzip compression when Zig std.compress API stabilizes
+        // For now, serve uncompressed file
+        _ = file_path;
+        _ = mime;
+
+        // Read entire file
+        var buffer = try server.allocator.alloc(u8, size);
+        defer server.allocator.free(buffer);
+
+        var read_buffer: [65536]u8 = undefined;
+        var file_reader = file.reader(ctx.io, &read_buffer).interface;
+        var bytes_read: u64 = 0;
+
+        while (bytes_read < size) {
+            const remaining = size - bytes_read;
+            const to_read: usize = if (read_buffer.len < remaining) read_buffer.len else @intCast(remaining);
+            var bufs: [1][]u8 = .{buffer[@intCast(bytes_read)..][0..to_read]};
+            const n = try (&file_reader).* .vtable.readVec(&file_reader, &bufs);
+            if (n == 0) break;
+            bytes_read += @intCast(n);
+        }
+
+        // Note: When compression is implemented, compress buffer here
+        // and set Content-Encoding: gzip header
+
+        // For now, send uncompressed
+        try ctx.response.writeAll(buffer);
+        return false; // Return false to fall back to normal serving
     }
 
     /// Serve directory listing

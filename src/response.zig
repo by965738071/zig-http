@@ -40,9 +40,15 @@ pub const Response = struct {
         try res.body.appendSlice(res.allocator, data);
     }
 
-    pub fn writeJSON(res: *Response, _: anytype) !void {
+    pub fn writeJSON(res: *Response, data: anytype) !void {
         try res.setHeader("Content-Type", "application/json; charset=utf-8");
-        try res.write("{}");
+
+        // Use std.json.Stringify.valueAlloc to serialize the data
+        const json_str = try std.json.Stringify.valueAlloc(res.allocator, data, .{});
+        defer res.allocator.free(json_str);
+
+        // Write the JSON to the response body
+        try res.write(json_str);
     }
 
     pub fn setStatus(res: *Response, status: http.Status) void {
