@@ -1,37 +1,32 @@
 const std = @import("std");
 const http = std.http;
+const StringInterner = @import("zero_copy.zig").StringInterner;
 
 pub const Response = struct {
     allocator: std.mem.Allocator,
     status: http.Status = .ok,
     headers: std.StringHashMap([]const u8),
     body: std.ArrayList(u8),
+    string_interner: *StringInterner,
 
-    pub fn init(allocator: std.mem.Allocator) !Response {
+    pub fn init(allocator: std.mem.Allocator, string_interner: *StringInterner) !Response {
         return .{
             .allocator = allocator,
             .headers = std.StringHashMap([]const u8).init(allocator),
             .body = std.ArrayList(u8){},
+            .string_interner = string_interner,
         };
     }
 
     pub fn deinit(res: *Response) void {
-        var it = res.headers.iterator();
-        while (it.next()) |entry| {
-            res.allocator.free(entry.key_ptr.*);
-            res.allocator.free(entry.value_ptr.*);
-        }
+        // Note: Headers keys/values are interned, not owned by Response
+        // Do NOT free them here - they are managed by StringInterner
         res.headers.deinit();
         res.body.deinit(res.allocator);
     }
 
     pub fn reset(res: *Response) void {
         res.status = .ok;
-        var it = res.headers.iterator();
-        while (it.next()) |entry| {
-            res.allocator.free(entry.key_ptr.*);
-            res.allocator.free(entry.value_ptr.*);
-        }
         res.headers.clearRetainingCapacity();
         res.body.clearRetainingCapacity();
     }
@@ -56,17 +51,14 @@ pub const Response = struct {
     }
 
     pub fn setHeader(res: *Response, name: []const u8, value: []const u8) !void {
-        const name_copy = try res.allocator.dupe(u8, name);
-        errdefer res.allocator.free(name_copy);
-        const value_copy = try res.allocator.dupe(u8, value);
-        errdefer res.allocator.free(value_copy);
+        // Use StringInterner to avoid duplicate allocations
+        const name_interned = try res.string_interner.intern(name);
+        const value_interned = try res.string_interner.intern(value);
 
-        if (res.headers.getPtr(name_copy)) |existing| {
-            res.allocator.free(existing.*);
-            existing.* = value_copy;
-            res.allocator.free(name_copy);
+        if (res.headers.getPtr(name_interned)) |existing| {
+            existing.* = value_interned;
         } else {
-            try res.headers.put(name_copy, value_copy);
+            try res.headers.put(name_interned, value_interned);
         }
     }
 

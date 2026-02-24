@@ -12,6 +12,7 @@ const Cookie = @import("cookie.zig").Cookie;
 const Session = @import("session.zig").Session;
 const SessionManager = @import("session.zig").SessionManager;
 const utils = @import("utils.zig");
+const StringInterner = @import("zero_copy.zig").StringInterner;
 
 pub const Context = struct {
     server: *HTTPServer,
@@ -119,7 +120,7 @@ pub const Context = struct {
         return null;
     }
 
-    /// Get all query parameters as a HashMap
+    /// Get all query parameters as a HashMap (optimized with StringInterner)
     pub fn getAllQueries(ctx: *Context) !std.StringHashMap([]const u8) {
         const target = ctx.request.head.target;
         var result = std.StringHashMap([]const u8).init(ctx.allocator);
@@ -127,6 +128,9 @@ pub const Context = struct {
 
         const query_start = std.mem.indexOfScalar(u8, target, '?') orelse return result;
         const query = target[query_start + 1 ..];
+
+        // Use server's StringInterner for query parameter deduplication
+        const interner = &ctx.server.string_interner;
 
         var iter = std.mem.splitScalar(u8, query, '&');
         while (iter.next()) |pair| {
@@ -136,13 +140,12 @@ pub const Context = struct {
             if (eq_pos) |pos| {
                 const key = pair[0..pos];
                 const value = pair[pos + 1 ..];
-                const key_copy = try ctx.allocator.dupe(u8, key);
-                errdefer ctx.allocator.free(key_copy);
-                const value_copy = try ctx.allocator.dupe(u8, value);
-                try result.put(key_copy, value_copy);
+                const key_interned = try interner.intern(key);
+                const value_interned = try interner.intern(value);
+                try result.put(key_interned, value_interned);
             } else {
-                const key_copy = try ctx.allocator.dupe(u8, pair);
-                try result.put(key_copy, "");
+                const key_interned = try interner.intern(pair);
+                try result.put(key_interned, "");
             }
         }
 
@@ -160,17 +163,19 @@ pub const Context = struct {
         return null;
     }
 
-    /// Get all headers as a HashMap
+    /// Get all headers as a HashMap (optimized with StringInterner)
     pub fn getAllHeaders(ctx: *Context) !std.StringHashMap([]const u8) {
         var result = std.StringHashMap([]const u8).init(ctx.allocator);
         errdefer result.deinit();
 
+        // Use server's StringInterner for header deduplication
+        const interner = &ctx.server.string_interner;
+
         var it = ctx.request.iterateHeaders();
         while (it.next()) |header| {
-            const key_copy = try ctx.allocator.dupe(u8, header.name);
-            errdefer ctx.allocator.free(key_copy);
-            const value_copy = try ctx.allocator.dupe(u8, header.value);
-            try result.put(key_copy, value_copy);
+            const key_interned = try interner.intern(header.name);
+            const value_interned = try interner.intern(header.value);
+            try result.put(key_interned, value_interned);
         }
 
         return result;
@@ -181,8 +186,9 @@ pub const Context = struct {
         const ptr = try ctx.allocator.create(T);
         ptr.* = value;
 
-        const key_copy = try ctx.allocator.dupe(u8, key);
-        try ctx.state.put(key_copy, @ptrCast(ptr));
+        // Use server's StringInterner for state keys
+        const key_interned = try ctx.server.string_interner.intern(key);
+        try ctx.state.put(key_interned, @ptrCast(ptr));
     }
 
     pub fn getState(ctx: Context, key: []const u8) ?*anyopaque {

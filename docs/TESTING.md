@@ -164,7 +164,7 @@ test "Context initializes correctly" {
     var server = try HTTPServer.init(gpa.allocator(), .{ .port = 8080 });
     defer server.deinit();
 
-    var response = try @import("../../src/response.zig").Response.init(allocator);
+    var response = try @import("../../src/response.zig").Response.init(allocator, &server.string_interner);
     defer response.deinit();
 
     // 简化的测试 - 实际需要模拟 HTTP Request
@@ -199,11 +199,14 @@ test "Context stores and retrieves state" {
 const std = @import("std");
 const testing = std.testing;
 const Response = @import("../../src/response.zig").Response;
+const StringInterner = @import("../../src/zero_copy.zig").StringInterner;
 
 test "Response initializes with default status" {
     const allocator = testing.allocator;
+    var interner = StringInterner.init(allocator);
+    defer interner.deinit();
 
-    var response = try Response.init(allocator);
+    var response = try Response.init(allocator, &interner);
     defer response.deinit();
 
     try testing.expect(@intFromEnum(response.status) == 200);
@@ -211,8 +214,10 @@ test "Response initializes with default status" {
 
 test "Response sets and gets headers" {
     const allocator = testing.allocator;
+    var interner = StringInterner.init(allocator);
+    defer interner.deinit();
 
-    var response = try Response.init(allocator);
+    var response = try Response.init(allocator, &interner);
     defer response.deinit();
 
     try response.setHeader("Content-Type", "application/json");
@@ -227,8 +232,10 @@ test "Response sets and gets headers" {
 
 test "Response has header check" {
     const allocator = testing.allocator;
+    var interner = StringInterner.init(allocator);
+    defer interner.deinit();
 
-    var response = try Response.init(allocator);
+    var response = try Response.init(allocator, &interner);
     defer response.deinit();
 
     try response.setHeader("X-Custom", "value");
@@ -239,8 +246,10 @@ test "Response has header check" {
 
 test "Response writes data" {
     const allocator = testing.allocator;
+    var interner = StringInterner.init(allocator);
+    defer interner.deinit();
 
-    var response = try Response.init(allocator);
+    var response = try Response.init(allocator, &interner);
     defer response.deinit();
 
     try response.write("Hello, ");
@@ -251,8 +260,10 @@ test "Response writes data" {
 
 test "Response writeJSON" {
     const allocator = testing.allocator;
+    var interner = StringInterner.init(allocator);
+    defer interner.deinit();
 
-    var response = try Response.init(allocator);
+    var response = try Response.init(allocator, &interner);
     defer response.deinit();
 
     const data = struct { name: []const u8, age: u32 }{
@@ -269,8 +280,10 @@ test "Response writeJSON" {
 
 test "Response reset" {
     const allocator = testing.allocator;
+    var interner = StringInterner.init(allocator);
+    defer interner.deinit();
 
-    var response = try Response.init(allocator);
+    var response = try Response.init(allocator, &interner);
     defer response.deinit();
 
     try response.setHeader("X-Test", "value");
@@ -1100,8 +1113,10 @@ test "Context initialization does not leak memory" {
 ```zig
 test "Response handles large bodies" {
     const allocator = testing.allocator;
+    var interner = StringInterner.init(allocator);
+    defer interner.deinit();
 
-    var response = try Response.init(allocator);
+    var response = try Response.init(allocator, &interner);
     defer response.deinit();
 
     // 测试 1MB 数据

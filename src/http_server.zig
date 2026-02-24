@@ -14,6 +14,7 @@ const Metrics = @import("monitoring.zig").Metrics;
 const ErrorHandler = @import("error_handler.zig").ErrorHandler;
 const Logger = @import("error_handler.zig").Logger;
 const WebSocketServer = @import("websocket.zig").WebSocketServer;
+const StringInterner = @import("zero_copy.zig").StringInterner;
 
 
 // Helper: read exactly `buf.len` bytes from a reader (returns number read or error)
@@ -118,6 +119,7 @@ pub const HTTPServer = struct {
     metrics: ?*Metrics = null,
     error_handler: ?*ErrorHandler = null,
     logger: ?*Logger = null,
+    string_interner: StringInterner,
 
     pub fn init(allocator: std.mem.Allocator, config: Config) !HTTPServer {
         return .{
@@ -136,6 +138,7 @@ pub const HTTPServer = struct {
             .metrics = null,
             .error_handler = null,
             .logger = null,
+            .string_interner = StringInterner.init(allocator),
         };
     }
 
@@ -173,6 +176,7 @@ pub const HTTPServer = struct {
             middleware.vtable.destroy(middleware);
         }
         server.middlewares.deinit(server.allocator);
+        server.string_interner.deinit();
     }
 
     pub fn use(server: *HTTPServer, middleware: *Middleware) void {
@@ -417,7 +421,7 @@ fn handleConnection(server: *HTTPServer, stream: Io.net.Stream) void {
         const max_body_size = server.config.max_request_body_size;
         if (content_length > max_body_size) {
             std.log.warn("Request body exceeds maximum size: {d} > {d}", .{ content_length, max_body_size });
-            var response = Response.init(server.allocator) catch {
+            var response = Response.init(server.allocator, &server.string_interner) catch {
                 // If response init fails, send minimal error response
                 const w = &writer.interface;
                 w.writeAll("HTTP/1.1 413 Payload Too Large\r\n\r\n") catch {};
@@ -500,7 +504,7 @@ fn handleConnection(server: *HTTPServer, stream: Io.net.Stream) void {
         }
 
         // Create response and context, attach body if present, then handle request
-        var response = Response.init(server.allocator) catch {
+        var response = Response.init(server.allocator, &server.string_interner) catch {
             // If response init fails, we can't continue
             break;
         };

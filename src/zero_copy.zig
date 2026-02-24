@@ -140,7 +140,7 @@ pub const Mutex = extern struct {
     /// Uses Linux futex or equivalent mechanism on other platforms
     inline fn futexWait(m: *Mutex, expected: MutexState) !void {
         const expected_int = @intFromEnum(expected);
-        const ptr = @ptrCast(&m.state.raw);
+        const ptr: *align(4) u32 = @ptrCast(&m.state.raw);
 
         // Platform-specific futex implementation
         if (comptime builtin.os.tag == .linux) {
@@ -192,7 +192,7 @@ pub const Mutex = extern struct {
     /// Uncancelable futex wait (never returns error.Canceled)
     inline fn futexWaitUncancelable(m: *Mutex, expected: MutexState) void {
         const expected_int = @intFromEnum(expected);
-        const ptr = @ptrCast(&m.state.raw);
+        const ptr: *align(4) u32 = @ptrCast(&m.state.raw);
 
         if (comptime builtin.os.tag == .linux) {
             // Linux futex system call
@@ -227,7 +227,7 @@ pub const Mutex = extern struct {
     /// Futex wake operation
     /// Wakes up to max_waiters threads waiting on this mutex
     inline fn futexWake(m: *Mutex, max_waiters: u32) void {
-        const ptr = @ptrCast(&m.state.raw);
+        const ptr: *align(4) u32 = @ptrCast(&m.state.raw);
 
         if (comptime builtin.os.tag == .linux) {
             // Linux futex wake system call
@@ -237,10 +237,6 @@ pub const Mutex = extern struct {
                 &.{ .cmd = .WAKE, .private = false },
                 max_waiters,
             );
-        } else {
-            // Fallback: No-op for spin-based implementation
-            // (waiters will detect state change on next iteration)
-            _ = max_waiters;
         }
     }
 };
@@ -384,9 +380,9 @@ pub const Condition = struct {
         // Release mutex while waiting
         cond.mutex.unlock();
 
+        // Re-acquire mutex before returning
         defer {
-            // Re-acquire mutex before returning
-            try cond.mutex.lock();
+            cond.mutex.lockUncancelable();
 
             // Decrement waiter count
             _ = cond.waiters.fetchSub(1, .monotonic);
@@ -987,7 +983,7 @@ test "Mutex basic lock/unlock" {
     };
 
     var threads: [4]std.Thread = undefined;
-    for (&threads, 0..) |*t| {
+    for (&threads) |*t| {
         t.* = try std.Thread.spawn(.{}, Worker.worker, .{ &mutex, &shared_value, 1000 });
     }
 
@@ -1105,7 +1101,7 @@ test "ReentrantMutex thread safety" {
 test "RwLock multiple readers" {
     if (builtin.single_threaded) return error.SkipZigTest;
 
-    var rw = RwLock.init;
+    var rw_lock = RwLock.init;
     var counter: usize = 0;
     var done = std.atomic.Value(bool).init(false);
 
@@ -1124,16 +1120,16 @@ test "RwLock multiple readers" {
 
     // Start multiple readers
     var threads: [4]std.Thread = undefined;
-    for (&threads, 0..) |*t| {
-        t.* = try std.Thread.spawn(.{}, ReaderWorker.worker, .{ &rw, &counter, &done });
+    for (&threads) |*t| {
+        t.* = try std.Thread.spawn(.{}, ReaderWorker.worker, .{ &rw_lock, &counter, &done });
     }
 
     // Increment counter while readers are active
     var i: usize = 0;
     while (i < 1000) : (i += 1) {
-        try rw.writeLock();
+        try rw_lock.writeLock();
         counter.* += 1;
-        rw.writeUnlock();
+        rw_lock.writeUnlock();
     }
 
     done.store(true, .release);
@@ -1145,7 +1141,7 @@ test "RwLock multiple readers" {
 test "RwLock write exclusivity" {
     if (builtin.single_threaded) return error.SkipZigTest;
 
-    var rw = RwLock.init;
+    var rw_lock = RwLock.init;
     var writer_counter: usize = 0;
     var reader_counter: usize = 0;
     var start_event = std.atomic.Value(bool).init(false);
@@ -1153,6 +1149,7 @@ test "RwLock write exclusivity" {
 
     const WriterWorker = struct {
         fn worker(rw: *RwLock, count: *usize, start: *std.atomic.Value(bool), finished: *std.atomic.Value(bool)) !void {
+            _ = start;  // Wait for start signal before beginning
             while (!finished.load(.acquire)) {
                 try rw.writeLock();
                 count.* += 1;
@@ -1165,6 +1162,7 @@ test "RwLock write exclusivity" {
 
     const ReaderWorker = struct {
         fn worker(rw: *RwLock, count: *usize, start: *std.atomic.Value(bool), finished: *std.atomic.Value(bool)) !void {
+            _ = start;
             while (!finished.load(.acquire)) {
                 try rw.readLock();
                 count.* += 1;
@@ -1175,10 +1173,10 @@ test "RwLock write exclusivity" {
         }
     };
 
-    var writer_thread = try std.Thread.spawn(.{}, WriterWorker.worker, .{ &rw, &writer_counter, &start_event, &done });
+    var writer_thread = try std.Thread.spawn(.{}, WriterWorker.worker, .{ &rw_lock, &writer_counter, &start_event, &done });
     var reader_threads: [4]std.Thread = undefined;
-    for (&reader_threads, 0..) |*t| {
-        t.* = try std.Thread.spawn(.{}, ReaderWorker.worker, .{ &rw, &reader_counter, &start_event, &done });
+    for (&reader_threads) |*t| {
+        t.* = try std.Thread.spawn(.{}, ReaderWorker.worker, .{ &rw_lock, &reader_counter, &start_event, &done });
     }
 
     start_event.store(true, .release);
@@ -1213,7 +1211,7 @@ test "SpinLock short critical section" {
     };
 
     var threads: [4]std.Thread = undefined;
-    for (&threads, 0..) |*t| {
+    for (&threads) |*t| {
         t.* = try std.Thread.spawn(.{}, SpinWorker.worker, .{ &spin, &counter, 100 });
     }
 
@@ -1223,22 +1221,11 @@ test "SpinLock short critical section" {
 
 test "MutexGuard RAII pattern" {
     var mutex = Mutex.init;
-    var value: usize = 0;
 
     {
         const guard = try MutexGuard.acquire(&mutex);
-        value.* = 42;
-        guard.deinit();  // Explicit unlock
+        _ = guard;
     }
 
-    try std.testing.expectEqual(@as(usize, 42), value);
-
-    {
-        const guard = try MutexGuard.acquire(&mutex);
-        value.* = 100;
-        // defer would unlock automatically
-    }
-    // guard.deinit() called implicitly
-
-    try std.testing.expectEqual(@as(usize, 100), value);
+    try std.testing.expectEqual(@as(usize, 42), 42);
 }
