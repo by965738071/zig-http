@@ -119,7 +119,6 @@ pub const HTTPServer = struct {
     error_handler: ?*ErrorHandler = null,
     logger: ?*Logger = null,
 
-   
     pub fn init(allocator: std.mem.Allocator, config: Config) !HTTPServer {
         return .{
             .allocator = allocator,
@@ -571,7 +570,7 @@ fn handleRequest(server: *HTTPServer, context: *Context, writer: anytype) !bool 
                 static_srv.handle(context) catch |err| {
                     std.log.err("Static file error: {}", .{err});
                     context.setStatus(http.Status.internal_server_error);
-                    try context.json(.{ .error_val = "Internal server error" });
+                    try context.html("Internal server error");
                     try response.toHttpResponse(writer, request);
                     return true;
                 })

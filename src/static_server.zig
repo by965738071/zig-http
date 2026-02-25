@@ -11,7 +11,7 @@ pub const StaticConfig = struct {
     /// Prefix for URL (e.g., "/static")
     prefix: []const u8 = "",
     /// Enable directory listing
-    enable_directory_listing: bool = false,
+    enable_directory_listing: bool = true,
     /// Enable caching headers
     enable_cache: bool = true,
     /// Custom index file names (default: ["index.html", "index.htm"])
@@ -123,7 +123,11 @@ pub const StaticServer = struct {
         _ = @typeInfo(@TypeOf(ctx.response));
 
         // Open file - use new API with io
-        const file = try std.Io.Dir.cwd().openFile(ctx.io, file_path, .{});
+        const file = try std.Io.Dir.cwd().openFile(ctx.io, file_path, .{
+            .allow_directory = true,
+            .mode = .read_only,
+            .path_only = false,
+        });
         defer file.close(ctx.io);
 
         const stat = try file.stat(ctx.io);
@@ -182,14 +186,12 @@ pub const StaticServer = struct {
 
         // Read and send file using File.reader (std.Io 0.16 API)
         var buffer: [65536]u8 = undefined; // 64KB buffer
-        var file_reader = file.reader(ctx.io, &buffer).interface;
+        var file_reader_impl = file.reader(ctx.io, &buffer);
         var bytes_read: u64 = 0;
         while (bytes_read < size) {
             const remaining = size - bytes_read;
             const to_read: usize = if (buffer.len < remaining) buffer.len else @intCast(remaining);
-            const slice = buffer[0..to_read];
-            var bufs: [1][]u8 = .{slice};
-            const n = try (&file_reader).* .vtable.readVec(&file_reader, &bufs);
+            const n = try file_reader_impl.interface.readSliceShort(buffer[0..to_read]);
             if (n == 0) break;
             try ctx.response.writeAll(buffer[0..n]);
             bytes_read += @intCast(n);
@@ -247,29 +249,23 @@ pub const StaticServer = struct {
 
         // Stream the required range. If File API doesn't expose seek, we skip bytes by reading and discarding.
         var buffer: [65536]u8 = undefined;
-        var file_reader = file.reader(ctx.io, &buffer).interface;
+        var file_reader_impl = file.reader(ctx.io, &buffer);
 
         var to_skip: u64 = @intCast(start);
         while (to_skip > 0) {
-            const read_len: usize = if (buffer.len < to_skip) buffer.len else @intCast(start);
-            var bufs: [1][]u8 = .{buffer[0..read_len]};
-            const n = try (&file_reader).* .vtable.readVec(&file_reader, &bufs);
+            const read_len: usize = if (buffer.len < to_skip) buffer.len else @intCast(to_skip);
+            const n = try file_reader_impl.interface.readSliceShort(buffer[0..read_len]);
             if (n == 0) break;
             to_skip -= @intCast(n);
         }
 
         var remaining: u64 = chunk_len;
         while (remaining > 0) {
-            // compute a read length as usize (buffer.len is usize, remaining is u64)
-            //
             const remaing_cast: usize = @intCast(remaining);
-
             const read_len: usize = if (buffer.len < remaing_cast) buffer.len else remaing_cast;
-            var bufs: [1][]u8 = .{buffer[0..read_len]};
-            const n = try (&file_reader).* .vtable.readVec(&file_reader, &bufs);
+            const n = try file_reader_impl.interface.readSliceShort(buffer[0..read_len]);
             if (n == 0) break;
             try ctx.response.writeAll(buffer[0..n]);
-            // n is usize; remaining is u64 -> cast n to u64 before subtracting
             remaining -= @intCast(n);
         }
 
@@ -317,14 +313,13 @@ pub const StaticServer = struct {
         defer server.allocator.free(buffer);
 
         var read_buffer: [65536]u8 = undefined;
-        var file_reader = file.reader(ctx.io, &read_buffer).interface;
+        var file_reader_impl = file.reader(ctx.io, &read_buffer);
         var bytes_read: u64 = 0;
 
         while (bytes_read < size) {
             const remaining = size - bytes_read;
             const to_read: usize = if (read_buffer.len < remaining) read_buffer.len else @intCast(remaining);
-            var bufs: [1][]u8 = .{buffer[@intCast(bytes_read)..][0..to_read]};
-            const n = try (&file_reader).* .vtable.readVec(&file_reader, &bufs);
+            const n = try file_reader_impl.interface.readSliceShort(buffer[@intCast(bytes_read)..][0..to_read]);
             if (n == 0) break;
             bytes_read += @intCast(n);
         }
