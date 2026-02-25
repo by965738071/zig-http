@@ -1,14 +1,18 @@
 const std = @import("std");
 const Context = @import("context.zig").Context;
 
-/// Interceptor phase
-pub const Phase = enum {
-    /// Before request is processed
-    before_request,
-    /// After response is generated but before sending
-    after_response,
-    /// On error during request processing
-    on_error,
+/// Interceptor trait
+pub const Interceptor = struct {
+    name: []const u8,
+    /// Process the interceptor
+    process: *const fn (ctx: *InterceptorContext) anyerror!void,
+
+    pub fn init(name: []const u8, process_fn: *const fn (ctx: *InterceptorContext) anyerror!void) Interceptor {
+        return .{
+            .name = name,
+            .process = process_fn,
+        };
+    }
 };
 
 /// Interceptor context
@@ -32,18 +36,14 @@ pub const InterceptorContext = struct {
     }
 };
 
-/// Interceptor trait
-pub const Interceptor = struct {
-    name: []const u8,
-    /// Process the interceptor
-    process: *const fn (ctx: *InterceptorContext) anyerror!void,
-
-    pub fn init(name: []const u8, process_fn: *const fn (ctx: *InterceptorContext) anyerror!void) Interceptor {
-        return .{
-            .name = name,
-            .process = process_fn,
-        };
-    }
+/// Interceptor phase
+pub const Phase = enum {
+    /// Before request is processed
+    before_request,
+    /// After response is generated but before sending
+    after_response,
+    /// On error during request processing
+    on_error,
 };
 
 /// Interceptor registry
@@ -56,31 +56,31 @@ pub const InterceptorRegistry = struct {
     pub fn init(allocator: std.mem.Allocator) InterceptorRegistry {
         return .{
             .allocator = allocator,
-            .before_request = std.ArrayList(*Interceptor).init(allocator),
-            .after_response = std.ArrayList(*Interceptor).init(allocator),
-            .on_error = std.ArrayList(*Interceptor).init(allocator),
+            .before_request = std.ArrayList(*Interceptor).empty,
+            .after_response = std.ArrayList(*Interceptor).empty,
+            .on_error = std.ArrayList(*Interceptor).empty,
         };
     }
 
     pub fn deinit(self: *InterceptorRegistry) void {
-        self.before_request.deinit();
-        self.after_response.deinit();
-        self.on_error.deinit();
+        self.before_request.deinit(self.allocator);
+        self.after_response.deinit(self.allocator);
+        self.on_error.deinit(self.allocator);
     }
 
     /// Add interceptor for before request phase
     pub fn addBeforeRequest(self: *InterceptorRegistry, interceptor: *Interceptor) !void {
-        try self.before_request.append(interceptor);
+        try self.before_request.append(self.allocator, interceptor);
     }
 
     /// Add interceptor for after response phase
     pub fn addAfterResponse(self: *InterceptorRegistry, interceptor: *Interceptor) !void {
-        try self.after_response.append(interceptor);
+        try self.after_response.append(self.allocator, interceptor);
     }
 
     /// Add interceptor for on error phase
     pub fn addOnError(self: *InterceptorRegistry, interceptor: *Interceptor) !void {
-        try self.on_error.append(interceptor);
+        try self.on_error.append(self.allocator, interceptor);
     }
 
     /// Execute all before request interceptors
@@ -142,25 +142,22 @@ pub fn loggingInterceptor(ctx: *InterceptorContext) !void {
 }
 
 /// Timing interceptor - measures request processing time
-var request_timings = std.StringHashMap(i64).init(std.heap.page_allocator);
+var request_counter: std.atomic.Value(u64) = std.atomic.Value(u64).init(0);
 
 pub fn timingInterceptor(ctx: *InterceptorContext) !void {
-    const request_id = ctx.context.getRequestId() orelse return error.NoRequestId;
+    const request_id = ctx.context.getRequestId() orelse return;
 
     switch (ctx.phase) {
         .before_request => {
-            const now = std.time.milliTimestamp();
-            try request_timings.put(request_id, now);
+            _ = request_counter.fetchAdd(1, .monotonic);
+            std.log.info("[{s}] Request started", .{request_id});
         },
         .after_response => {
-            const start_ms = request_timings.get(request_id) orelse return error.NoTiming;
-            const now = std.time.milliTimestamp();
-            const duration_ms = now - start_ms;
-            std.log.info("[{s}] Processing time: {d}ms", .{ request_id, duration_ms });
-            _ = request_timings.remove(request_id);
+            const current = request_counter.load(.monotonic);
+            std.log.info("[{s}] Request completed (total: {d})", .{request_id, current});
         },
         .on_error => {
-            _ = request_timings.remove(request_id);
+            std.log.warn("[{s}] Request failed", .{request_id});
         },
     }
 }

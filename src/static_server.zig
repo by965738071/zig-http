@@ -469,7 +469,7 @@ pub const StaticServer = struct {
             return false;
         };
 
-        std.debug.print("[static] url_path='{s}' file_path='{s}'\n", .{ url_path, file_path });
+        std.log.debug("[static] url_path='{s}' file_path='{s}'\n", .{ url_path, file_path });
         if (std.Io.Dir.cwd().openDir(ctx.io, file_path, .{ .iterate = true })) |dir| {
             dir.close(ctx.io);
             // It's a directory

@@ -64,6 +64,7 @@ pub fn main() !void {
     std.log.info("  ✅ Rate Limiting", .{});
     std.log.info("  ✅ Metrics & Monitoring", .{});
     std.log.info("  ✅ HTTP Client", .{});
+    std.log.info("  ✅ Interceptors", .{});
     std.log.info("========================================", .{});
     std.log.info("Middlewares:", .{});
     std.log.info("  🛡️  Auth (Bearer Token)", .{});
@@ -71,6 +72,11 @@ pub fn main() !void {
     std.log.info("  🛡️  CSRF Protection", .{});
     std.log.info("  🛡️  CORS", .{});
     std.log.info("  🛡️  Security Headers", .{});
+    std.log.info("========================================", .{});
+    std.log.info("Interceptors:", .{});
+    std.log.info("  📊 Logging", .{});
+    std.log.info("  ⏱️  Timing", .{});
+    std.log.info("  📏  Size Monitoring", .{});
     std.log.info("========================================", .{});
     std.log.info("Test Endpoints:", .{});
     std.log.info("  GET  /              - Home page", .{});
@@ -149,6 +155,25 @@ pub fn main() !void {
     // Start signal handling thread
     try signal_handler.setupSignalThread();
 
+    // Initialize Interceptor Registry
+    var interceptor_registry = InterceptorRegistry.init(allocator);
+    defer interceptor_registry.deinit();
+
+    // Create and add built-in interceptors
+    var logging_interceptor = Interceptor.init("logging", @import("interceptor.zig").loggingInterceptor);
+    try interceptor_registry.addBeforeRequest(&logging_interceptor);
+    try interceptor_registry.addAfterResponse(&logging_interceptor);
+    try interceptor_registry.addOnError(&logging_interceptor);
+
+    var timing_interceptor = Interceptor.init("timing", @import("interceptor.zig").timingInterceptor);
+    try interceptor_registry.addBeforeRequest(&timing_interceptor);
+    try interceptor_registry.addAfterResponse(&timing_interceptor);
+    try interceptor_registry.addOnError(&timing_interceptor);
+
+    var size_interceptor = Interceptor.init("size", @import("interceptor.zig").sizeInterceptor);
+    try interceptor_registry.addBeforeRequest(&size_interceptor);
+    try interceptor_registry.addAfterResponse(&size_interceptor);
+
     // Setup routes
     var route = try router.init(allocator);
     defer route.deinit();
@@ -183,6 +208,7 @@ pub fn main() !void {
     server.setMetrics(&metrics);
     server.setLogger(&logger);
     server.setRouter(route);
+    server.setInterceptorRegistry(&interceptor_registry);
 
     // Add middlewares
     var logger_middleware = try LoggingMiddleware.init(allocator);

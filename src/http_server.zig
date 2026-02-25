@@ -15,6 +15,7 @@ const ErrorHandler = @import("error_handler.zig").ErrorHandler;
 const Logger = @import("error_handler.zig").Logger;
 const WebSocketServer = @import("websocket.zig").WebSocketServer;
 const StringInterner = @import("zero_copy.zig").StringInterner;
+const InterceptorRegistry = @import("interceptor.zig").InterceptorRegistry;
 
 
 // Helper: read exactly `buf.len` bytes from a reader (returns number read or error)
@@ -120,6 +121,7 @@ pub const HTTPServer = struct {
     error_handler: ?*ErrorHandler = null,
     logger: ?*Logger = null,
     string_interner: StringInterner,
+    interceptor_registry: ?*InterceptorRegistry = null,
 
     pub fn init(allocator: std.mem.Allocator, config: Config) !HTTPServer {
         return .{
@@ -139,6 +141,7 @@ pub const HTTPServer = struct {
             .error_handler = null,
             .logger = null,
             .string_interner = StringInterner.init(allocator),
+            .interceptor_registry = null,
         };
     }
 
@@ -168,6 +171,10 @@ pub const HTTPServer = struct {
 
     pub fn setRouter(server: *HTTPServer, router: Router) void {
         server.router = router;
+    }
+
+    pub fn setInterceptorRegistry(server: *HTTPServer, registry: *InterceptorRegistry) void {
+        server.interceptor_registry = registry;
     }
 
     pub fn deinit(server: *HTTPServer) void {
@@ -547,6 +554,17 @@ fn handleRequest(server: *HTTPServer, context: *Context, writer: anytype) !bool 
     const request = context.request;
     const response = context.response;
 
+    // Execute before_request interceptors
+    if (server.interceptor_registry) |registry| {
+        registry.executeBeforeRequest(context) catch |err| {
+            std.log.err("Before request interceptor failed: {}", .{err});
+            context.setStatus(http.Status.internal_server_error);
+            try context.json(.{ .error_val = "Internal server error" });
+            try response.toHttpResponse(writer, request);
+            return true;
+        };
+    }
+
     // Check rate limit if configured
     // Note: Using request path as key since client IP is not available in request.head
     // In production, you'd want to track actual client IP from TCP connection
@@ -618,7 +636,19 @@ fn handleRequest(server: *HTTPServer, context: *Context, writer: anytype) !bool 
         std.log.err("Handler error: {}", .{err});
         context.setStatus(http.Status.internal_server_error);
         try context.json(.{ .error_val = "Internal server error" });
+
+        // Execute on_error interceptors
+        if (server.interceptor_registry) |registry| {
+            registry.executeOnError(context, err);
+        }
     };
+
+    // Execute after_response interceptors
+    if (server.interceptor_registry) |registry| {
+        registry.executeAfterResponse(context) catch |err| {
+            std.log.warn("After response interceptor failed: {}", .{err});
+        };
+    }
 
     try response.toHttpResponse(writer, request);
     return true;
