@@ -332,31 +332,124 @@ pub const StaticServer = struct {
         return false; // Return false to fall back to normal serving
     }
 
-    /// Serve directory listing
+    /// Serve directory listing (nginx-style)
     pub fn serveDirectory(server: *StaticServer, ctx: anytype, dir_path: []const u8) !bool {
-        _ = @typeInfo(@TypeOf(ctx.response));
-        // writer field removed
-
-        const dir = try std.Io.Dir.cwd().openDir(ctx.io, dir_path, .{});
+        const dir = try std.Io.Dir.cwd().openDir(ctx.io, dir_path, .{ .iterate = true });
         defer dir.close(ctx.io);
 
-        try ctx.html("<!DOCTYPE html>\n<html><head><title>Directory Listing</title></head>\n<body>\n");
+        // Current URL path (with trailing slash)
+        const url_path = ctx.request.head.target;
+        const url_with_slash = if (mem.endsWith(u8, url_path, "/")) url_path else blk: {
+            const s = try std.fmt.allocPrint(server.allocator, "{s}/", .{url_path});
+            defer server.allocator.free(s);
+            break :blk s;
+        };
 
-        try ctx.html("<h1>Index of ");
-        try ctx.text(dir_path);
-        try ctx.html("</h1>\n<ul>\n");
+        // Collect entries first so we can sort them
+        const DirEntry = struct {
+            name: []const u8,
+            is_dir: bool,
+            size: u64,
+            mtime: i96,
+        };
+        var entries: std.ArrayList(DirEntry) = .empty;
+        defer {
+            for (entries.items) |e| server.allocator.free(e.name);
+            entries.deinit(server.allocator);
+        }
 
         var it = dir.iterate();
         while (try it.next(ctx.io)) |entry| {
-            const name = entry.name;
+            const name_copy = try server.allocator.dupe(u8, entry.name);
             const is_dir = entry.kind == .directory;
-
-            const suffix = if (is_dir) "/" else "";
-            const item = try std.fmt.allocPrint(server.allocator, "<li><a href=\"{s}{s}\">{s}{s}</a></li>\n", .{ name, suffix, name, suffix });
-            try ctx.response.writeAll(item);
+            var size: u64 = 0;
+            var mtime: i96 = 0;
+            // Try to stat each entry for size/mtime
+            const entry_path = try std.fs.path.join(server.allocator, &.{ dir_path, entry.name });
+            defer server.allocator.free(entry_path);
+            if (std.Io.Dir.cwd().statFile(ctx.io, entry_path, .{})) |st| {
+                size = st.size;
+                mtime = st.mtime.nanoseconds;
+            } else |_| {}
+            try entries.append(server.allocator, .{ .name = name_copy, .is_dir = is_dir, .size = size, .mtime = mtime });
         }
 
-        try ctx.html("</ul>\n</body></html>\n");
+        // Sort: directories first, then files, both alphabetically
+        mem.sort(DirEntry, entries.items, {}, struct {
+            fn lessThan(_: void, a: DirEntry, b: DirEntry) bool {
+                if (a.is_dir != b.is_dir) return a.is_dir;
+                return mem.lessThan(u8, a.name, b.name);
+            }
+        }.lessThan);
+
+        // Write HTML directly to response
+        try ctx.response.setHeader("Content-Type", "text/html; charset=utf-8");
+
+        const header = try std.fmt.allocPrint(server.allocator,
+            \\<!DOCTYPE html>
+            \\<html>
+            \\<head>
+            \\<meta charset="utf-8">
+            \\<title>Index of {s}</title>
+            \\<style>
+            \\body{{font-family:monospace;margin:20px;background:#fff;color:#222}}
+            \\h1{{border-bottom:1px solid #ccc;padding-bottom:8px;font-size:1.2em}}
+            \\table{{border-collapse:collapse;width:100%}}
+            \\th{{text-align:left;border-bottom:2px solid #ccc;padding:4px 12px 4px 0;color:#555}}
+            \\td{{padding:3px 12px 3px 0;white-space:nowrap}}
+            \\a{{color:#0066cc;text-decoration:none}}
+            \\a:hover{{text-decoration:underline}}
+            \\tr:hover td{{background:#f5f5f5}}
+            \\td.size{{text-align:right;padding-right:24px;color:#555}}
+            \\td.date{{color:#555}}
+            \\</style>
+            \\</head>
+            \\<body>
+            \\<h1>Index of {s}</h1>
+            \\<table>
+            \\<tr><th>Name</th><th class="size">Size</th><th>Last Modified</th></tr>
+            \\
+        , .{ url_path, url_path });
+        defer server.allocator.free(header);
+        try ctx.response.writeAll(header);
+
+        // Parent directory link (unless at root)
+        if (!mem.eql(u8, url_path, "/") and !mem.eql(u8, url_path, server.config.prefix) and
+            url_path.len > server.config.prefix.len)
+        {
+            try ctx.response.writeAll("<tr><td><a href=\"../\">../</a></td><td class=\"size\">-</td><td class=\"date\">-</td></tr>\n");
+        }
+
+        for (entries.items) |entry| {
+            const suffix = if (entry.is_dir) "/" else "";
+
+            // Format size
+            var size_buf: [32]u8 = undefined;
+            const size_str = if (entry.is_dir) "-" else blk: {
+                break :blk if (entry.size < 1024)
+                    std.fmt.bufPrint(&size_buf, "{d} B", .{entry.size}) catch "-"
+                else if (entry.size < 1024 * 1024)
+                    std.fmt.bufPrint(&size_buf, "{d:.1} KB", .{@as(f64, @floatFromInt(entry.size)) / 1024.0}) catch "-"
+                else if (entry.size < 1024 * 1024 * 1024)
+                    std.fmt.bufPrint(&size_buf, "{d:.1} MB", .{@as(f64, @floatFromInt(entry.size)) / (1024.0 * 1024.0)}) catch "-"
+                else
+                    std.fmt.bufPrint(&size_buf, "{d:.1} GB", .{@as(f64, @floatFromInt(entry.size)) / (1024.0 * 1024.0 * 1024.0)}) catch "-";
+            };
+
+            // Format mtime as simple timestamp (seconds)
+            var date_buf: [32]u8 = undefined;
+            const date_str = if (entry.mtime == 0) "-" else
+                std.fmt.bufPrint(&date_buf, "{d}", .{@divTrunc(entry.mtime, @as(i96, std.time.ns_per_s))}) catch "-";
+
+            const row = try std.fmt.allocPrint(server.allocator,
+                "<tr><td><a href=\"{s}{s}{s}\">{s}{s}</a></td><td class=\"size\">{s}</td><td class=\"date\">{s}</td></tr>\n",
+                .{ url_with_slash, entry.name, suffix, entry.name, suffix, size_str, date_str },
+            );
+            defer server.allocator.free(row);
+            try ctx.response.writeAll(row);
+        }
+
+        try ctx.response.writeAll("</table>\n</body>\n</html>\n");
         return true;
     }
 
@@ -376,49 +469,35 @@ pub const StaticServer = struct {
             return false;
         };
 
-        // Check if path exists - use new API with io
+        std.debug.print("[static] url_path='{s}' file_path='{s}'\n", .{ url_path, file_path });
+        if (std.Io.Dir.cwd().openDir(ctx.io, file_path, .{ .iterate = true })) |dir| {
+            dir.close(ctx.io);
+            // It's a directory
+            if (server.config.enable_directory_listing) {
+                return try serveDirectory(server, ctx, file_path);
+            }
+            // Try to serve index file
+            for (server.config.index_files) |index_name| {
+                const index_path = try std.fs.path.join(server.allocator, &.{ file_path, index_name });
+                defer server.allocator.free(index_path);
+                std.Io.Dir.cwd().access(ctx.io, index_path, .{}) catch continue;
+                return try serveFile(server, ctx, index_path);
+            }
+            ctx.response.setStatus(http.Status.forbidden);
+            try ctx.text("Directory listing disabled");
+            return false;
+        } else |err| {
+            std.debug.print("[static] openDir('{s}') failed: {}\n", .{ file_path, err });
+        }
+
+        // Not a directory — check if it exists as a file
         std.Io.Dir.cwd().access(ctx.io, file_path, .{}) catch {
             ctx.response.setStatus(http.Status.not_found);
             try ctx.text("File not found");
             return false;
         };
 
-        // Get file info - use new API with io
-        const file_info = std.Io.Dir.cwd().statFile(ctx.io, file_path, .{}) catch {
-            ctx.response.setStatus(http.Status.not_found);
-            try ctx.text("File not found");
-            return false;
-        };
-
-        // Serve directory or file
-        switch (file_info.kind) {
-            .directory => {
-                if (server.config.enable_directory_listing) {
-                    return try serveDirectory(server, ctx, file_path);
-                }
-
-                // Try to serve index file
-                for (server.config.index_files) |index_name| {
-                    const index_path = try std.fs.path.join(server.allocator, &.{ file_path, index_name });
-                    std.Io.Dir.cwd().access(ctx.io, index_path, .{}) catch continue;
-
-                    // Found index file, serve it
-                    return try serveFile(server, ctx, index_path);
-                }
-
-                ctx.response.setStatus(http.Status.forbidden);
-                try ctx.text("Directory listing disabled");
-                return false;
-            },
-            .file => {
-                return try serveFile(server, ctx, file_path);
-            },
-            else => {
-                ctx.response.setStatus(http.Status.not_found);
-                try ctx.text("File not found");
-                return false;
-            },
-        }
+        return try serveFile(server, ctx, file_path);
     }
 };
 
