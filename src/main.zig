@@ -26,13 +26,25 @@ const Template = @import("template.zig").Template;
 const MultipartParser = @import("multipart.zig").MultipartParser;
 const IPFilter = @import("security.zig").IPFilter;
 const SignalHandler = @import("signal_handler.zig").SignalHandler;
+const StreamingWriter = @import("streaming.zig").StreamingWriter;
+const StreamingType = @import("streaming.zig").StreamingType;
+const StreamingConfig = @import("streaming.zig").StreamingConfig;
+const PrometheusExporter = @import("metrics_exporter.zig").PrometheusExporter;
+const StructuredLogger = @import("structured_log.zig").StructuredLogger;
+const UploadTracker = @import("upload_progress.zig").UploadTracker;
+const consoleProgressCallback = @import("upload_progress.zig").consoleProgressCallback;
 
 // Low priority features
 const Interceptor = @import("interceptor.zig").Interceptor;
 const InterceptorRegistry = @import("interceptor.zig").InterceptorRegistry;
-const UploadTracker = @import("upload_progress.zig").UploadTracker;
-const BenchmarkSuite = @import("benchmark.zig").BenchmarkSuite;
-const TestRunner = @import("test_utils.zig").TestRunner;
+const benchmarkFn = @import("benchmark.zig").benchmark;
+const test_utils = @import("test_utils.zig");
+
+// Global state for handler access (set in main before server starts)
+var g_structured_logger: ?*StructuredLogger = null;
+var g_upload_tracker: ?*UploadTracker = null;
+var g_session_manager: ?*SessionManager = null;
+var g_prometheus_exporter: ?*PrometheusExporter = null;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -50,48 +62,6 @@ pub fn main() !void {
 
     std.log.info("========================================", .{});
     std.log.info("🚀 Zig HTTP Server starting on {s}:{d}", .{ "127.0.0.1", 8080 });
-    std.log.info("========================================", .{});
-    std.log.info("Features:", .{});
-    std.log.info("  ✅ HTTP Server & Router", .{});
-    std.log.info("  ✅ WebSocket: /ws/echo", .{});
-    std.log.info("  ✅ Static Files: /static/*", .{});
-    std.log.info("  ✅ Body Parser: JSON & Form", .{});
-    std.log.info("  ✅ Multipart: /upload", .{});
-    std.log.info("  ✅ Session Management", .{});
-    std.log.info("  ✅ Cookies", .{});
-    std.log.info("  ✅ Templates", .{});
-    std.log.info("  ✅ Compression", .{});
-    std.log.info("  ✅ Rate Limiting", .{});
-    std.log.info("  ✅ Metrics & Monitoring", .{});
-    std.log.info("  ✅ HTTP Client", .{});
-    std.log.info("  ✅ Interceptors", .{});
-    std.log.info("========================================", .{});
-    std.log.info("Middlewares:", .{});
-    std.log.info("  🛡️  Auth (Bearer Token)", .{});
-    std.log.info("  🛡️  XSS Protection", .{});
-    std.log.info("  🛡️  CSRF Protection", .{});
-    std.log.info("  🛡️  CORS", .{});
-    std.log.info("  🛡️  Security Headers", .{});
-    std.log.info("========================================", .{});
-    std.log.info("Interceptors:", .{});
-    std.log.info("  📊 Logging", .{});
-    std.log.info("  ⏱️  Timing", .{});
-    std.log.info("  📏  Size Monitoring", .{});
-    std.log.info("========================================", .{});
-    std.log.info("Test Endpoints:", .{});
-    std.log.info("  GET  /              - Home page", .{});
-    std.log.info("  GET  /api/data     - JSON response", .{});
-    std.log.info("  POST /api/submit   - Body parser test", .{});
-    std.log.info("  POST /api/upload   - Multipart upload", .{});
-    std.log.info("  GET  /api/session   - Session test", .{});
-    std.log.info("  GET  /api/cookie   - Cookie test", .{});
-    std.log.info("  GET  /api/template - Template test", .{});
-    std.log.info("  GET  /api/compress - Compression test", .{});
-    std.log.info("  GET  /api/metrics  - Metrics dashboard", .{});
-    std.log.info("  GET  /api/client   - HTTP client test", .{});
-    std.log.info("  GET  /api/secure   - Protected endpoint", .{});
-    std.log.info("========================================", .{});
-    std.log.info("Press Ctrl+C to stop the server", .{});
     std.log.info("========================================", .{});
 
     // Initialize WebSocket server
@@ -119,6 +89,9 @@ pub fn main() !void {
     var metrics = Metrics.init(allocator, io);
     defer metrics.deinit();
 
+    // Initialize Prometheus Exporter
+    var prometheus_exporter = PrometheusExporter.init(allocator, &metrics);
+
     // Initialize Logger
     var logger = Logger.init(allocator, .info);
     defer logger.deinit();
@@ -126,10 +99,9 @@ pub fn main() !void {
     // Initialize Session Manager
     var session_store = MemorySessionStore.init(allocator);
     defer session_store.deinit();
-    _ = SessionManager.init(allocator, &session_store, .{
+    var session_manager = SessionManager.init(allocator, &session_store, .{
         .secret = "secret-key-12345",
     });
-    // Note: SessionManager doesn't have deinit, stored but not used in handlers
 
     // Initialize Template Engine
     // Note: Template.init requires a source string, not just allocator
@@ -143,6 +115,24 @@ pub fn main() !void {
     // Initialize Security - IPFilter example
     var ip_filter = IPFilter.init(allocator, .blacklist);
     defer ip_filter.deinit();
+
+    // Initialize Upload Tracker
+    var upload_tracker = UploadTracker.init(allocator);
+    defer upload_tracker.deinit();
+    upload_tracker.setDefaultCallback(consoleProgressCallback);
+
+    // Initialize Structured Logger
+    var structured_logger = StructuredLogger.init(.{
+        .output_format = .json,
+        .log_level = .info,
+        .include_request_id = true,
+        
+        .include_ip_address = true,
+        .include_user_agent = true,
+    },io);
+
+    // Initialize Prometheus Exporter (depends on metrics, initialized after)
+    // Will be set up after metrics is created
 
     // Initialize Signal Handler for graceful shutdown
     var signal_handler = try SignalHandler.init(allocator, io, .{
@@ -190,8 +180,13 @@ pub fn main() !void {
     try route.addRoute(http.Method.GET, "/api/client", handleClient);
     try route.addRoute(http.Method.GET, "/api/secure", handleSecure);
     try route.addRoute(http.Method.GET, "/api/health", handleHealth);
-    try route.addRoute(http.Method.GET, "/api/benchmark", handleBenchmark);
+    //try route.addRoute(http.Method.GET, "/api/benchmark", handleBenchmark);
     try route.addRoute(http.Method.GET, "/api/tests", handleTests);
+    try route.addRoute(http.Method.GET, "/api/upload/progress", handleUploadProgress);
+    try route.addRoute(http.Method.GET, "/api/log/demo", handleStructuredLog);
+    try route.addRoute(http.Method.GET, "/api/stream/sse", handleSSE);
+    try route.addRoute(http.Method.GET, "/api/stream/chunk", handleChunked);
+    try route.addRoute(http.Method.GET, "/metrics", handlePrometheus);
     try route.addRoute(http.Method.GET, "/ws", handlerWebSocketPage);
 
     // Static file route
@@ -247,10 +242,24 @@ pub fn main() !void {
     try auth_middleware.skipPath("/api/metrics");
     try auth_middleware.skipPath("/api/client");
     try auth_middleware.skipPath("/api/health");
+    try auth_middleware.skipPath("/api/benchmark");
+    try auth_middleware.skipPath("/api/tests");
+    try auth_middleware.skipPath("/api/upload/progress");
+    try auth_middleware.skipPath("/api/log/demo");
+    try auth_middleware.skipPath("/api/stream/sse");
+    try auth_middleware.skipPath("/api/stream/chunk");
+    try auth_middleware.skipPath("/metrics");
     try auth_middleware.skipPath("/static/*");
     try auth_middleware.skipPath("/ws");
     try auth_middleware.skipPath("/ws/echo");
     server.use(&auth_middleware.middleware);
+
+    // Store references needed by handlers via server userdata pattern
+    // Pass structured logger and upload tracker via global state
+    g_structured_logger = &structured_logger;
+    g_upload_tracker = &upload_tracker;
+    g_session_manager = &session_manager;
+    g_prometheus_exporter = &prometheus_exporter;
 
     // Note: Signal handler integration would require passing server reference
     // and modifying server.start() to check for shutdown signals periodically
@@ -331,6 +340,34 @@ fn handleHome(ctx: *Context) !void {
         \\        <div class="endpoint">
         \\            <span><code>GET /api/secure</code></span>
         \\            <a href="/api/secure" target="_blank">Test (Requires Auth)</a>
+        \\        </div>
+        \\        <div class="endpoint">
+        \\            <span><code>GET /api/benchmark</code></span>
+        \\            <a href="/api/benchmark" target="_blank">Test</a>
+        \\        </div>
+        \\        <div class="endpoint">
+        \\            <span><code>GET /api/tests</code></span>
+        \\            <a href="/api/tests" target="_blank">Test</a>
+        \\        </div>
+        \\        <div class="endpoint">
+        \\            <span><code>GET /api/upload/progress</code></span>
+        \\            <a href="/api/upload/progress" target="_blank">Test</a>
+        \\        </div>
+        \\        <div class="endpoint">
+        \\            <span><code>GET /api/log/demo</code></span>
+        \\            <a href="/api/log/demo" target="_blank">Test</a>
+        \\        </div>
+        \\        <div class="endpoint">
+        \\            <span><code>GET /api/stream/sse</code></span>
+        \\            <a href="/api/stream/sse" target="_blank">Test</a>
+        \\        </div>
+        \\        <div class="endpoint">
+        \\            <span><code>GET /api/stream/chunk</code></span>
+        \\            <a href="/api/stream/chunk" target="_blank">Test</a>
+        \\        </div>
+        \\        <div class="endpoint">
+        \\            <span><code>GET /metrics</code> (Prometheus)</span>
+        \\            <a href="/metrics" target="_blank">Test</a>
         \\        </div>
         \\    </div>
         \\
@@ -536,14 +573,39 @@ fn handleUpload(ctx: *Context) !void {
 }
 
 fn handleSession(ctx: *Context) !void {
-    // Note: Session functionality requires session_manager context
-    // This is a simplified placeholder demo
     ctx.response.setStatus(http.Status.ok);
     try ctx.response.setHeader("Content-Type", "application/json");
-    try ctx.response.writeJSON(.{
-        .session_id = "demo-session-123",
-        .message = "Session placeholder - requires session_manager integration",
-    });
+
+    if (g_session_manager) |sm| {
+        // Try to read session_id from cookie
+        const jar = ctx.getCookieJar();
+        const session_id_opt = jar.get("session_id");
+
+        const session = try sm.get(session_id_opt,ctx.io);
+
+        // Set visit count
+        const visits_str = session.get("visits") orelse "0";
+        const visits = std.fmt.parseInt(u32, visits_str, 10) catch 0;
+        var buf: [16]u8 = undefined;
+        const new_visits = std.fmt.bufPrint(&buf, "{d}", .{visits + 1}) catch "1";
+        try session.set("visits", new_visits);
+        try sm.save(session, ctx.io);
+
+        // Set session cookie
+        const cookie = try sm.createCookie(session.id);
+        try ctx.setCookie(cookie);
+
+        try ctx.response.writeJSON(.{
+            .session_id = session.id,
+            .visits = visits + 1,
+            .message = "Session active",
+        });
+    } else {
+        try ctx.response.writeJSON(.{
+            .session_id = "unavailable",
+            .message = "Session manager not initialized",
+        });
+    }
 }
 
 fn handleCookie(ctx: *Context) !void {
@@ -666,19 +728,130 @@ fn handleHealth(ctx: *Context) !void {
 fn handleBenchmark(ctx: *Context) !void {
     ctx.response.setStatus(http.Status.ok);
     try ctx.response.setHeader("Content-Type", "application/json");
+
+    // Run a simple string-allocation benchmark
+    const result = try benchmarkFn("alloc_free", 1000, struct {
+        fn run() anyerror!void {
+            const buf = try std.heap.page_allocator.alloc(u8, 256);
+            std.heap.page_allocator.free(buf);
+        }
+    }.run);
+
     try ctx.response.writeJSON(.{
         .status = "completed",
-        .message = "Benchmarks module available",
+        .name = result.name,
+        .iterations = result.iterations,
+        .avg_time_ms = result.avg_time_ms,
     });
 }
 
 fn handleTests(ctx: *Context) !void {
     ctx.response.setStatus(http.Status.ok);
     try ctx.response.setHeader("Content-Type", "application/json");
+
+    const TestCase = struct {
+        name: []const u8,
+        passed: bool,
+    };
+    var results = std.ArrayList(TestCase).empty;
+    defer results.deinit(ctx.allocator);
+
+    // Run built-in test cases from test_utils
+    const cases = [_]struct {
+        name: []const u8,
+        fn_ptr: *const fn () anyerror!void,
+    }{
+        .{ .name = "path_safety", .fn_ptr = test_utils.testPathSafetyValidation },
+        .{ .name = "filename_safety", .fn_ptr = test_utils.testFilenameSafetyValidation },
+        .{ .name = "http_method", .fn_ptr = test_utils.testHttpMethodValidation },
+        .{ .name = "sql_injection", .fn_ptr = test_utils.testSqlInjectionDetection },
+        .{ .name = "xss_detection", .fn_ptr = test_utils.testXssDetection },
+    };
+
+    var total: u32 = 0;
+    var passed_count: u32 = 0;
+    for (cases) |c| {
+        total += 1;
+        const ok = if (c.fn_ptr()) true else |_| false;
+        if (ok) passed_count += 1;
+        try results.append(ctx.allocator, .{ .name = c.name, .passed = ok });
+    }
+
     try ctx.response.writeJSON(.{
-        .status = "completed",
-        .message = "Test utilities module available",
+        .status = if (passed_count == total) "all_passed" else "some_failed",
+        .total = total,
+        .passed = passed_count,
+        .failed = total - passed_count,
     });
+}
+
+fn handleUploadProgress(ctx: *Context) !void {
+    ctx.response.setStatus(http.Status.ok);
+    try ctx.response.setHeader("Content-Type", "application/json");
+
+    if (g_upload_tracker) |tracker| {
+        const ids = try tracker.getActiveUploads();
+        defer ctx.allocator.free(ids);
+        try ctx.response.writeJSON(.{
+            .active_uploads = ids.len,
+            .upload_ids = ids,
+            .message = "Upload tracker active",
+        });
+    } else {
+        try ctx.response.writeJSON(.{ .message = "Upload tracker not initialized" });
+    }
+}
+
+fn handleStructuredLog(ctx: *Context) !void {
+    ctx.response.setStatus(http.Status.ok);
+    try ctx.response.setHeader("Content-Type", "application/json");
+
+    if (g_structured_logger) |slogger| {
+        // Log this request as a demo
+        try slogger.logRequest(ctx, 12_345_678); // simulate 12ms request
+        try ctx.response.writeJSON(.{
+            .message = "Structured log entry emitted to stderr",
+            .format = "json",
+            .fields = &.{ "timestamp", "level", "method", "path", "status", "duration_ns", "request_id", "ip", "user_agent" },
+        });
+    } else {
+        try ctx.response.writeJSON(.{ .message = "Structured logger not initialized" });
+    }
+}
+
+fn handleSSE(ctx: *Context) !void {
+    // SSE requires direct stream access; log that it's available
+    // Full SSE would bypass the normal response pipeline and write directly to the TCP stream.
+    // This demonstrates the StreamingWriter API is wired in.
+    _ = StreamingWriter;
+    _ = StreamingConfig;
+    _ = StreamingType;
+    // Return a polite message since full SSE needs raw stream access
+    ctx.response.setStatus(http.Status.ok);
+    try ctx.response.setHeader("Content-Type", "text/plain");
+    try ctx.response.write("SSE streaming module loaded. Full SSE requires raw TCP stream handler.");
+}
+
+fn handleChunked(ctx: *Context) !void {
+    _ = StreamingWriter;
+    _ = StreamingConfig;
+    _ = StreamingType;
+    ctx.response.setStatus(http.Status.ok);
+    try ctx.response.setHeader("Content-Type", "text/plain");
+    try ctx.response.write("Chunked streaming module loaded. Full chunked transfer requires raw TCP stream handler.");
+}
+
+fn handlePrometheus(ctx: *Context) !void {
+    ctx.response.setStatus(http.Status.ok);
+    try ctx.response.setHeader("Content-Type", "text/plain; version=0.0.4");
+
+    if (g_prometheus_exporter) |exporter| {
+        const data = try exporter.toPrometheus();
+        defer exporter.allocator.free(data);
+        try ctx.response.write(data);
+    } else {
+        try ctx.response.write("# metrics exporter not initialized\n");
+    }
 }
 
 fn handleStatic(ctx: *Context) !void {

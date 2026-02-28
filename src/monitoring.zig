@@ -79,7 +79,8 @@ pub const Metrics = struct {
 
         try result.appendSlice(allocator, "{\n");
 
-        const uptime = std.time.timestamp() - metrics.start_time;
+        const io = std.io.getStdIn().io;
+        const uptime = std.Io.now(io, .monotonic).toMilliseconds() - metrics.start_time;
         try result.print(allocator, "  \"uptime_seconds\": {d},\n", .{uptime});
         try result.print(allocator, "  \"total_requests\": {d},\n", .{metrics.total_requests});
         try result.print(allocator, "  \"active_connections\": {d},\n", .{metrics.active_connections});
@@ -118,7 +119,8 @@ pub const RequestId = struct {
 
     pub fn next(rid: *RequestId) ![]const u8 {
         const count = rid.counter.fetchAdd(1, .monotonic);
-        const timestamp = std.time.timestamp();
+        const io = std.io.getStdIn().io;
+        const timestamp = std.Io.now(io, .monotonic).toMilliseconds();
 
         // Format: timestamp-nodeid-counter
         const allocator = std.heap.page_allocator;
@@ -238,7 +240,8 @@ pub const JsonLogger = struct {
 
     /// Log message
     pub fn log(logger: *JsonLogger, level: []const u8, message: []const u8, _: anytype) void {
-        const timestamp = std.time.timestamp();
+        const io = std.io.getStdIn().io;
+        const timestamp = std.Io.now(io, .monotonic).toMilliseconds();
 
         // Build JSON log entry
         const entry = std.fmt.allocPrint(logger.allocator, "{{\"timestamp\": {d}, \"level\": \"{s}\", \"message\": \"{s}\"}}", .{ timestamp, level, message }) catch return;

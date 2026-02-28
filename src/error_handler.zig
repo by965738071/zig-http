@@ -141,7 +141,7 @@ pub const Logger = struct {
     }
 
     fn log(logger: *Logger, level_str: []const u8, message: []const u8, _: anytype) void {
-        const timestamp = std.time.timestamp();
+        const timestamp = std.Io.now(std.io.getStdIn().io, .monotonic).toMilliseconds();
         const timestamp_str = logger.formatTimestamp(timestamp);
 
         const entry = std.fmt.allocPrint(logger.allocator, "[{s}] {s}: {s}\n", .{ timestamp_str, level_str, message }) catch return;

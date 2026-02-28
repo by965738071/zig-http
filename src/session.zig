@@ -4,15 +4,17 @@ const SameSite = @import("cookie.zig").SameSite;
 
 /// Session data
 pub const Session = struct {
+    io:std.Io,
     id: []const u8,
     data: std.StringHashMap([]const u8),
     created_at: i64,
     updated_at: i64,
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, session_id: []const u8) Session {
-        const now = std.time.timestamp();
+    pub fn init(allocator: std.mem.Allocator, session_id: []const u8,io:std.Io) Session {
+        const now = std.Io.Timestamp.now(io,.boot).toMilliseconds();
         return .{
+            .io = io,
             .id = session_id,
             .data = std.StringHashMap([]const u8).init(allocator),
             .created_at = now,
@@ -38,14 +40,14 @@ pub const Session = struct {
         const key_copy = try session.allocator.dupe(u8, key);
         const value_copy = try session.allocator.dupe(u8, value);
         try session.data.put(key_copy, value_copy);
-        session.updated_at = std.time.timestamp();
+        session.updated_at = std.Io.Timestamp.now(session.io,.boot).toMilliseconds();
     }
 
     pub fn remove(session: *Session, key: []const u8) void {
         if (session.data.fetchRemove(key)) |entry| {
             session.allocator.free(entry.key);
             session.allocator.free(entry.value);
-            session.updated_at = std.time.timestamp();
+            session.updated_at = std.time.milliTimestamp();
         }
     }
 
@@ -90,22 +92,22 @@ pub const MemorySessionStore = struct {
         store.sessions.deinit();
     }
 
-    pub fn get(store: *MemorySessionStore, session_id: []const u8) ?*Session {
-        store.mutex.lock();
-        defer store.mutex.unlock();
+    pub fn get(store: *MemorySessionStore, session_id: []const u8, io: std.Io) ?*Session {
+        store.mutex.lockUncancelable(io);
+        defer store.mutex.unlock(io);
         return store.sessions.get(session_id);
     }
 
-    pub fn set(store: *MemorySessionStore, session: *Session) !void {
-        store.mutex.lock();
-        defer store.mutex.unlock();
+    pub fn set(store: *MemorySessionStore, session: *Session, io: std.Io) !void {
+        store.mutex.lockUncancelable(io);
+        defer store.mutex.unlock(io);
         const session_id = try store.allocator.dupe(u8, session.id);
         try store.sessions.put(session_id, session);
     }
 
-    pub fn destroy(store: *MemorySessionStore, session_id: []const u8) void {
-        store.mutex.lock();
-        defer store.mutex.unlock();
+    pub fn destroy(store: *MemorySessionStore, session_id: []const u8, io: std.Io) void {
+        store.mutex.lockUncancelable(io);
+        defer store.mutex.unlock(io);
         if (store.sessions.fetchRemove(session_id)) |entry| {
             store.allocator.free(entry.key);
             entry.value.deinit();
@@ -114,21 +116,21 @@ pub const MemorySessionStore = struct {
     }
 
     /// Clean expired sessions
-    pub fn cleanup(store: *MemorySessionStore, max_age: i64) void {
-        store.mutex.lock();
-        defer store.mutex.unlock();
+    pub fn cleanup(store: *MemorySessionStore, max_age: i64, io: std.Io) void {
+        store.mutex.lockUncancelable(io);
+        defer store.mutex.unlock(io);
 
-        const now = std.time.timestamp();
+        const now = std.Io.now(io, .monotonic).toMilliseconds();
         var keys = std.ArrayList([]const u8).init(store.allocator);
         defer {
             for (keys.items) |k| store.allocator.free(k);
-            keys.deinit();
+            keys.deinit(store.allocator);
         }
 
         var it = store.sessions.iterator();
         while (it.next()) |entry| {
-            if (now - entry.value_ptr.updated_at > max_age) {
-                try keys.append(entry.key_ptr.*);
+            if (now - entry.value_ptr.*.updated_at > max_age) {
+                keys.append(store.allocator, entry.key_ptr.*) catch continue;
             }
         }
 
@@ -156,12 +158,38 @@ pub const MemorySessionStore = struct {
         store.running.store(false, .release);
     }
 
-    /// Background cleanup task
+    /// Background cleanup task (uses tryLock to avoid blocking without io)
     fn cleanupTask(store: *MemorySessionStore, max_age: i64) void {
         while (store.running.load(.acquire)) {
             std.time.sleep(store.cleanup_interval_ns);
-            store.cleanup(max_age);
+            store.cleanupNonBlocking(max_age);
             std.log.debug("Session cleanup completed", .{});
+        }
+    }
+
+    /// Non-blocking cleanup using tryLock (for use in background threads)
+    fn cleanupNonBlocking(store: *MemorySessionStore, max_age: i64) void {
+        if (!store.mutex.tryLock()) return;
+        defer store.mutex.unlock(undefined); // unlock doesn't need io in practice
+
+        const now = std.time.milliTimestamp();
+        var it = store.sessions.iterator();
+        var to_remove: [64][]const u8 = undefined;
+        var count: usize = 0;
+
+        while (it.next()) |entry| {
+            if (now - entry.value_ptr.*.updated_at > max_age and count < to_remove.len) {
+                to_remove[count] = entry.key_ptr.*;
+                count += 1;
+            }
+        }
+
+        for (to_remove[0..count]) |key| {
+            if (store.sessions.fetchRemove(key)) |entry| {
+                store.allocator.free(entry.key);
+                entry.value.deinit();
+                store.allocator.destroy(entry.value);
+            }
         }
     }
 };
@@ -181,49 +209,40 @@ pub const SessionManager = struct {
     }
 
     /// Generate session ID
-    pub fn generateSessionId(manager: SessionManager) ![]const u8 {
-        // Generate random 32-byte session ID
+    pub fn generateSessionId(manager: SessionManager, io: std.Io) ![]const u8 {
         var bytes: [32]u8 = undefined;
-        std.crypto.random.bytes(&bytes);
-
-        var session_id = std.ArrayList(u8).init(manager.allocator, {});
-        try session_id.ensureCapacity(64);
-
+        io.random(&bytes);
         var buf: [64]u8 = undefined;
-        const hex = try std.fmt.bufPrintZ(&buf, "{s}", .{std.fmt.fmtSliceHexLower(&bytes)});
-        try session_id.appendSlice(hex);
-
-        return session_id.toOwnedSlice();
+        const hex = std.fmt.bufPrint(&buf, "{x}", .{bytes}) catch unreachable;
+        return manager.allocator.dupe(u8, hex);
     }
 
     /// Get or create session
-    pub fn get(manager: *SessionManager, session_id: ?[]const u8) !*Session {
+    pub fn get(manager: *SessionManager, session_id: ?[]const u8, io: std.Io) !*Session {
         if (session_id) |sid| {
-            if (manager.store.get(sid)) |session| {
+            if (manager.store.get(sid, io)) |session| {
                 return session;
             }
         }
 
-        // Create new session
-        const new_id = try manager.generateSessionId();
-        const id_copy = try manager.allocator.dupe(u8, new_id);
-        manager.allocator.free(new_id);
+        const id_copy = try manager.generateSessionId(io);
+        errdefer manager.allocator.free(id_copy);
 
         const session = try manager.allocator.create(Session);
-        session.* = Session.init(manager.allocator, id_copy);
-        try manager.store.set(session);
+        session.* = Session.init(manager.allocator, id_copy,io);
+        try manager.store.set(session, io);
 
         return session;
     }
 
     /// Save session
-    pub fn save(manager: SessionManager, session: *Session) !void {
-        try manager.store.set(session);
+    pub fn save(manager: SessionManager, session: *Session, io: std.Io) !void {
+        try manager.store.set(session, io);
     }
 
     /// Destroy session
-    pub fn destroy(manager: *SessionManager, session_id: []const u8) void {
-        manager.store.destroy(session_id);
+    pub fn destroy(manager: *SessionManager, session_id: []const u8, io: std.Io) void {
+        manager.store.destroy(session_id, io);
     }
 
     /// Create session cookie

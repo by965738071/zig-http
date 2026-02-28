@@ -86,7 +86,7 @@ pub const WebSocketConnection = struct {
             .write_buffer = std.ArrayList(u8).init(allocator, {}),
             .read_buffer = read_buffer,
             .closed = std.atomic.Value(bool).init(false),
-            .last_ping = std.atomic.Value(i64).init(std.time.timestamp()),
+            .last_ping = std.atomic.Value(i64).init(std.Io.now(io, .monotonic).toMilliseconds()),
             .ping_interval = 30000, // 30 seconds
             .ping_timeout = 60000, // 60 seconds
             .subprotocol = null,
@@ -124,7 +124,7 @@ pub const WebSocketConnection = struct {
 
         conn.write_buffer.clearRetainingCapacity();
         try conn.write_frame(&.{}, .ping);
-        conn.last_ping.store(std.time.timestamp(), .monotonic);
+        conn.last_ping.store(std.Io.now(conn.io, .monotonic).toMilliseconds(), .monotonic);
     }
 
     /// Send pong
@@ -144,7 +144,7 @@ pub const WebSocketConnection = struct {
 
     /// Check if connection is alive
     pub fn isAlive(conn: *WebSocketConnection) bool {
-        const now = std.time.timestamp();
+        const now = std.Io.now(conn.io, .monotonic).toMilliseconds();
         const last = conn.last_ping.load(.monotonic);
         return (now - last) < conn.ping_timeout;
     }

@@ -134,27 +134,24 @@ pub fn isUrlEncoded(input: []const u8) bool {
     return true;
 }
 
-/// Check for SQL injection patterns (basic check)
+/// Check for SQL injection patterns (basic check, case-insensitive, no alloc)
 pub fn containsSqlInjection(input: []const u8) bool {
     const patterns = [_][]const u8{
-        "' OR '",
-        "' UNION ",
-        "DROP ",
-        "DELETE ",
-        "INSERT ",
-        "UPDATE ",
-        "SELECT ",
+        "' or '",
+        "' union ",
+        "drop ",
+        "delete ",
+        "insert ",
+        "update ",
+        "select ",
         "exec(",
         "eval(",
         "script:",
         "javascript:",
     };
 
-    const lower = try std.ascii.allocLowerString(std.heap.page_allocator, input);
-    defer std.heap.page_allocator.free(lower);
-
     for (patterns) |pattern| {
-        if (std.mem.indexOf(u8, lower, pattern)) |_| {
+        if (std.ascii.indexOfIgnoreCase(input, pattern) != null) {
             return true;
         }
     }
@@ -162,7 +159,7 @@ pub fn containsSqlInjection(input: []const u8) bool {
     return false;
 }
 
-/// Check for XSS patterns (basic check)
+/// Check for XSS patterns (basic check, case-insensitive, no alloc)
 pub fn containsXss(input: []const u8) bool {
     const patterns = [_][]const u8{
         "<script",
@@ -178,11 +175,8 @@ pub fn containsXss(input: []const u8) bool {
         "<embed",
     };
 
-    const lower = try std.ascii.allocLowerString(std.heap.page_allocator, input);
-    defer std.heap.page_allocator.free(lower);
-
     for (patterns) |pattern| {
-        if (std.mem.indexOf(u8, lower, pattern)) |_| {
+        if (std.ascii.indexOfIgnoreCase(input, pattern) != null) {
             return true;
         }
     }

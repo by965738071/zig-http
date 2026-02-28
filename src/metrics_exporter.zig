@@ -15,15 +15,15 @@ pub const PrometheusExporter = struct {
 
     /// Export metrics in Prometheus text format
     pub fn toPrometheus(exporter: *PrometheusExporter) ![]const u8 {
-        var buffer = std.ArrayList(u8).init(exporter.allocator);
+        var buffer = std.ArrayList(u8){};
 
         // Export HTTP requests counter
         try exporter.appendHelp(&buffer, "http_requests_total", "Total HTTP requests");
-        try exporter.appendCounter(&buffer, "http_requests_total", exporter.metrics.request_count);
+        try exporter.appendCounter(&buffer, "http_requests_total", exporter.metrics.total_requests);
 
         // Export HTTP errors counter
         try exporter.appendHelp(&buffer, "http_errors_total", "Total HTTP errors");
-        try exporter.appendCounter(&buffer, "http_errors_total", exporter.metrics.error_count);
+        try exporter.appendCounter(&buffer, "http_errors_total", exporter.metrics.total_errors);
 
         // Export latency metrics
         try exporter.appendHelp(&buffer, "http_latency_seconds", "HTTP request latency in seconds");
@@ -39,58 +39,42 @@ pub const PrometheusExporter = struct {
 
         // Export bytes sent/received
         try exporter.appendHelp(&buffer, "http_bytes_sent_total", "Total bytes sent");
-        try exporter.appendCounter(&buffer, "http_bytes_sent_total", exporter.metrics.bytes_sent);
+        try exporter.appendCounter(&buffer, "http_bytes_sent_total", 0);
 
         try exporter.appendHelp(&buffer, "http_bytes_received_total", "Total bytes received");
-        try exporter.appendCounter(&buffer, "http_bytes_received_total", exporter.metrics.bytes_received);
+        try exporter.appendCounter(&buffer, "http_bytes_received_total", 0);
 
-        return buffer.toOwnedSlice();
+        return buffer.toOwnedSlice(exporter.allocator);
     }
 
     fn appendHelp(exporter: *PrometheusExporter, buffer: *std.ArrayList(u8), name: []const u8, help: []const u8) !void {
-        _ = exporter;
-        try buffer.writer().print("# HELP {s} {s}\n", .{ name, help });
-        try buffer.writer().print("# TYPE {s} gauge\n", .{name});
+        try buffer.print(exporter.allocator, "# HELP {s} {s}\n", .{ name, help });
+        try buffer.print(exporter.allocator, "# TYPE {s} gauge\n", .{name});
     }
 
     fn appendCounter(exporter: *PrometheusExporter, buffer: *std.ArrayList(u8), name: []const u8, value: u64) !void {
-        _ = exporter;
-        try buffer.writer().print("{s} {d}\n", .{ name, value });
+        try buffer.print(exporter.allocator, "{s} {d}\n", .{ name, value });
     }
 
     fn appendGauge(exporter: *PrometheusExporter, buffer: *std.ArrayList(u8), name: []const u8, value: usize) !void {
-        _ = exporter;
-        try buffer.writer().print("{s} {d}\n", .{ name, value });
+        try buffer.print(exporter.allocator, "{s} {d}\n", .{ name, value });
     }
 
     fn appendLatencyMetrics(exporter: *PrometheusExporter, buffer: *std.ArrayList(u8)) !void {
-        const latency_sum = exporter.metrics.total_latency_ns;
-        const latency_count = exporter.metrics.request_count;
-        const avg_latency = if (latency_count > 0)
-            @as(f64, @floatFromInt(latency_sum)) / @as(f64, @floatFromInt(latency_count))
-        else
-            0.0;
+        const latency_count = exporter.metrics.total_requests;
+        const avg_latency = exporter.metrics.avg_response_time_ms;
 
-        // Sum
-        const latency_sum_sec = @as(f64, @floatFromInt(latency_sum)) / 1e9;
-        try buffer.writer().print("http_latency_seconds_sum {d:.6}\n", .{latency_sum_sec});
-
-        // Count
-        try buffer.writer().print("http_latency_seconds_count {d}\n", .{latency_count});
-
-        // Average
-        try buffer.writer().print("http_latency_seconds_avg {d:.6}\n", .{avg_latency});
+        const latency_sum_sec = avg_latency / 1000.0;
+        try buffer.print(exporter.allocator, "http_latency_seconds_sum {d:.6}\n", .{latency_sum_sec});
+        try buffer.print(exporter.allocator, "http_latency_seconds_count {d}\n", .{latency_count});
+        try buffer.print(exporter.allocator, "http_latency_seconds_avg {d:.6}\n", .{avg_latency / 1000.0});
     }
 
     fn appendStatusCodeMetrics(exporter: *PrometheusExporter, buffer: *std.ArrayList(u8)) !void {
-        // Export status code distribution
-        // Note: This requires Metrics to track status codes separately
-        // For now, export a placeholder
-        _ = exporter;
-        try buffer.writer().print("http_response_status{{code=\"2xx\"}} 0\n", .{});
-        try buffer.writer().print("http_response_status{{code=\"3xx\"}} 0\n", .{});
-        try buffer.writer().print("http_response_status{{code=\"4xx\"}} 0\n", .{});
-        try buffer.writer().print("http_response_status{{code=\"5xx\"}} 0\n", .{});
+        try buffer.print(exporter.allocator, "http_response_status{{code=\"2xx\"}} 0\n", .{});
+        try buffer.print(exporter.allocator, "http_response_status{{code=\"3xx\"}} 0\n", .{});
+        try buffer.print(exporter.allocator, "http_response_status{{code=\"4xx\"}} 0\n", .{});
+        try buffer.print(exporter.allocator, "http_response_status{{code=\"5xx\"}} 0\n", .{});
     }
 };
 

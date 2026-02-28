@@ -113,9 +113,11 @@ pub const CSRFManager = struct {
     /// Generate CSRF token
     pub fn generateToken(manager: *CSRFManager, session_id: []const u8) ![]const u8 {
         // Simple token generation using HMAC
+        const io = std.io.getStdIn().io;
+        const now = std.Io.now(io, .monotonic).toMilliseconds();
         var hasher = std.crypto.auth.hmac.sha2.HmacSha256.init(manager.secret);
         hasher.update(session_id);
-        hasher.update(&std.mem.toBytes(std.time.timestamp()));
+        hasher.update(&std.mem.toBytes(now));
         const mac = hasher.finalize();
 
         const token = try manager.allocator.alloc(u8, mac.len * 2);
@@ -126,14 +128,15 @@ pub const CSRFManager = struct {
             token[i * 2 + 1] = hex2;
         }
 
-        try manager.tokens.put(token, std.time.timestamp());
+        try manager.tokens.put(token, now);
         return token;
     }
 
     /// Validate CSRF token
     pub fn validateToken(manager: *CSRFManager, token: []const u8) bool {
         const created_at = manager.tokens.get(token) orelse return false;
-        const now = std.time.timestamp();
+        const io = std.io.getStdIn().io;
+        const now = std.Io.now(io, .monotonic).toMilliseconds();
 
         // Check if token expired
         if (now - created_at > manager.token_ttl) {
@@ -147,7 +150,8 @@ pub const CSRFManager = struct {
 
     /// Clean up expired tokens
     pub fn cleanup(manager: *CSRFManager) void {
-        const now = std.time.timestamp();
+        const io = std.io.getStdIn().io;
+        const now = std.Io.now(io, .monotonic).toMilliseconds();
         var keys = std.ArrayList([]const u8).init(manager.allocator);
         defer {
             for (keys.items) |k| manager.allocator.free(k);

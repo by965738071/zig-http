@@ -21,10 +21,11 @@ pub const LogLevel = enum { debug, info, warn, err };
 
 /// Structured logger for HTTP requests
 pub const StructuredLogger = struct {
+    io:std.Io,
     config: LogConfig,
 
-    pub fn init(config: LogConfig) StructuredLogger {
-        return .{ .config = config };
+    pub fn init(config: LogConfig,io:std.Io) StructuredLogger {
+        return .{ .config = config,.io = io };
     }
 
     /// Log an HTTP request with timing
@@ -33,14 +34,16 @@ pub const StructuredLogger = struct {
         defer ctx.allocator.free(log_entry);
 
         const level = logger.determineLogLevel(ctx, duration_ns);
-        const log_fn = switch (level) {
-            .debug => std.log.debug,
-            .info => std.log.info,
-            .warn => std.log.warn,
-            .err => std.log.err,
-        };
 
-        log_fn("{s}", .{log_entry});
+        if (level == .debug) {
+            std.log.debug("{s}", .{log_entry});
+        } else if (level == .info) {
+            std.log.info("{s}", .{log_entry});
+        } else if (level == .warn) {
+            std.log.warn("{s}", .{log_entry});
+        } else if (level == .err) {
+            std.log.err("{s}", .{log_entry});
+        }
     }
 
     /// Log slow request
@@ -48,8 +51,8 @@ pub const StructuredLogger = struct {
         _ = logger; // Not used, kept for API consistency
         const duration_ms = @divTrunc(duration_ns, 1_000_000);
         std.log.warn("Slow request: {s} {s} - {d}ms - {s}", .{
-            ctx.method,
-            ctx.path,
+            @tagName(ctx.request.head.method),
+            ctx.request.head.target,
             duration_ms,
             ctx.getRequestId(),
         });
@@ -64,75 +67,81 @@ pub const StructuredLogger = struct {
     }
 
     fn buildTextLog(logger: *StructuredLogger, ctx: *Context, duration_ns: i64) ![]const u8 {
-        var buffer = std.ArrayList(u8).init(ctx.allocator);
+        var buffer = std.ArrayList(u8){};
         const duration_us = @divTrunc(duration_ns, 1000);
 
-        try buffer.writer().print("{s} {s} - {d}μs - {d}", .{
-            ctx.method,
-            ctx.path,
+        try buffer.print(ctx.allocator, "{s} {s} - {d}μs - {d}", .{
+            @tagName(ctx.request.head.method),
+            ctx.request.head.target,
             duration_us,
             ctx.response.status,
         });
 
         if (logger.config.include_request_id) {
-            try buffer.writer().print(" - {s}", .{ctx.getRequestId()});
+            try buffer.print(ctx.allocator, " - {s}", .{ctx.getRequestId() orelse "unknown"});
         }
 
         if (logger.config.include_ip_address) {
-            try buffer.writer().print(" - {s}", .{ctx.ip_address orelse "unknown"});
+            const ip = ctx.getHeader("X-Forwarded-For") orelse
+                ctx.getHeader("X-Real-IP") orelse "unknown";
+            try buffer.print(ctx.allocator, " - {s}", .{ip});
         }
 
         if (logger.config.include_user_agent) {
             const ua = ctx.getHeader("User-Agent") orelse "-";
-            try buffer.writer().print(" - \"{s}\"", .{ua});
+            try buffer.print(ctx.allocator, " - \"{s}\"", .{ua});
         }
 
-        return buffer.toOwnedSlice();
+        return buffer.toOwnedSlice(ctx.allocator);
     }
 
     fn buildJsonLog(logger: *StructuredLogger, ctx: *Context, duration_ns: i64) ![]const u8 {
-        var buffer = std.ArrayList(u8).init(ctx.allocator);
+        var buffer = std.ArrayList(u8){};
 
-        try buffer.appendSlice("{");
-        try buffer.writer().print("\"timestamp\":{d},", .{std.time.timestamp()});
-        try buffer.writer().print("\"level\":\"{s}\",", .{@tagName(logger.config.log_level)});
-        try buffer.writer().print("\"method\":\"{s}\",", .{ctx.method});
-        try buffer.writer().print("\"path\":\"{s}\",", .{ctx.path});
-        try buffer.writer().print("\"status\":{d},", .{ctx.response.status});
-        try buffer.writer().print("\"duration_ns\":{d},", .{duration_ns});
+        try buffer.appendSlice(ctx.allocator, "{");
+        
+        try buffer.print(ctx.allocator, "\"timestamp\":{d},", .{std.Io.Timestamp.now(logger.io, .boot).toMilliseconds()});
+        try buffer.print(ctx.allocator, "\"level\":\"{s}\",", .{@tagName(logger.config.log_level)});
+        try buffer.print(ctx.allocator, "\"method\":\"{s}\",", .{@tagName(ctx.request.head.method)});
+        try buffer.print(ctx.allocator, "\"path\":\"{s}\",", .{ctx.request.head.target});
+        try buffer.print(ctx.allocator, "\"status\":{d},", .{ctx.response.status});
+        try buffer.print(ctx.allocator, "\"duration_ns\":{d},", .{duration_ns});
 
         if (logger.config.include_request_id) {
-            try buffer.writer().print("\"request_id\":\"{s}\",", .{ctx.getRequestId()});
+            try buffer.print(ctx.allocator, "\"request_id\":\"{s}\",", .{ctx.getRequestId() orelse "unknown"});
         }
 
         if (logger.config.include_ip_address) {
-            try buffer.writer().print("\"ip\":\"{s}\",", .{ctx.ip_address orelse "unknown"});
+            const ip = ctx.getHeader("X-Forwarded-For") orelse
+                ctx.getHeader("X-Real-IP") orelse "unknown";
+            try buffer.print(ctx.allocator, "\"ip\":\"{s}\",", .{ip});
         }
 
         if (logger.config.include_user_agent) {
             const ua = ctx.getHeader("User-Agent") orelse "-";
             const escaped_ua = escapeJsonString(ua);
-            try buffer.writer().print("\"user_agent\":\"{s}\",", .{escaped_ua});
+            try buffer.print(ctx.allocator, "\"user_agent\":\"{s}\",", .{escaped_ua});
         }
 
         if (logger.config.include_headers) {
-            try buffer.appendSlice("\"headers\":{");
-            const headers = ctx.getAllHeaders();
-            var it = headers.iterator();
+            try buffer.appendSlice(ctx.allocator, "\"headers\":{");
+            var allHeaders = try ctx.getAllHeaders();
+            var it = allHeaders.iterator();
             var first = true;
             while (it.next()) |entry| {
-                if (!first) try buffer.appendSlice(",");
+                if (!first) try buffer.appendSlice(ctx.allocator, ",");
                 first = false;
-                try buffer.writer().print("\"{s}\":\"{s}\"", .{
+                try buffer.print(ctx.allocator, "\"{s}\":\"{s}\"", .{
                     entry.key_ptr.*,
                     escapeJsonString(entry.value_ptr.*),
                 });
             }
-            try buffer.appendSlice("},");
+            allHeaders.deinit();
+            try buffer.appendSlice(ctx.allocator, "},");
         }
 
-        try buffer.appendSlice("}\n");
-        return buffer.toOwnedSlice();
+        try buffer.appendSlice(ctx.allocator, "}\n");
+        return buffer.toOwnedSlice(ctx.allocator);
     }
 
     fn determineLogLevel(logger: *StructuredLogger, ctx: *Context, duration_ns: i64) LogLevel {
@@ -140,7 +149,7 @@ pub const StructuredLogger = struct {
             return .warn;
         }
 
-        const status = ctx.response.status;
+        const status = @intFromEnum(ctx.response.status);
         if (status >= 500) {
             return .err;
         } else if (status >= 400) {
@@ -167,18 +176,21 @@ pub const ErrorLogger = struct {
 
     pub fn logError(logger: *ErrorLogger, ctx: *Context, err: anyerror) !void {
         _ = logger;
-        var buffer = std.ArrayList(u8).init(ctx.allocator);
-        defer buffer.deinit();
+        var buffer = std.ArrayList(u8){};
+        defer buffer.deinit(ctx.allocator);
 
-        try buffer.writer().print("{{", .{});
-        try buffer.writer().print("\"timestamp\":{d},", .{std.time.timestamp()});
-        try buffer.writer().print("\"level\":\"error\",", .{});
-        try buffer.writer().print("\"error\":\"{s}\",", .{@errorName(err)});
-        try buffer.writer().print("\"request_id\":\"{s}\",", .{ctx.getRequestId()});
-        try buffer.writer().print("\"method\":\"{s}\",", .{ctx.method});
-        try buffer.writer().print("\"path\":\"{s}\",", .{ctx.path});
-        try buffer.writer().print("\"ip\":\"{s}\"", .{ctx.ip_address orelse "unknown"});
-        try buffer.writer().print("}}", .{});
+        try buffer.print(ctx.allocator, "{{", .{});
+        try buffer.print(ctx.allocator, "\"timestamp\":{d},", .{std.time.milliTimestamp()});
+        try buffer.print(ctx.allocator, "\"level\":\"error\",", .{});
+        try buffer.print(ctx.allocator, "\"error\":\"{s}\",", .{@errorName(err)});
+        try buffer.print(ctx.allocator, "\"request_id\":\"{s}\",", .{ctx.getRequestId() orelse "unknown"});
+        try buffer.print(ctx.allocator, "\"method\":\"{s}\",", .{@tagName(ctx.request.head.method)});
+        try buffer.print(ctx.allocator, "\"path\":\"{s}\",", .{ctx.request.head.target});
+
+        const ip = ctx.getHeader("X-Forwarded-For") orelse
+            ctx.getHeader("X-Real-IP") orelse "unknown";
+        try buffer.print(ctx.allocator, "\"ip\":\"{s}\"", .{ip});
+        try buffer.print(ctx.allocator, "}}", .{});
 
         std.log.err("{s}", .{buffer.items});
     }

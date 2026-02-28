@@ -71,8 +71,8 @@ pub const LoggingMiddleware = struct {
         };
 
         log_fn("{s} {s} - {d}μs - {d} - {s}", .{
-            ctx.method,
-            ctx.path,
+            @tagName(ctx.request.head.method),
+            ctx.request.head.target,
             elapsed_us,
             ctx.response.status,
             ctx.getRequestId(),
@@ -91,6 +91,9 @@ pub const LoggingMiddleware = struct {
         var buffer = std.ArrayList(u8).init(ctx.allocator);
         defer buffer.deinit();
 
+        const ip = ctx.getHeader("X-Forwarded-For") orelse
+            ctx.getHeader("X-Real-IP") orelse "unknown";
+
         try buffer.writer().print(
             \\{{
             \\  "timestamp":{d},
@@ -103,14 +106,14 @@ pub const LoggingMiddleware = struct {
             \\  "ip":"{s}"
         ,
             .{
-                std.time.timestamp(),
+                std.Io.now(std.io.getStdIn().io, .monotonic).toMilliseconds(),
                 @tagName(self.config.log_level),
-                ctx.method,
-                ctx.path,
+                @tagName(ctx.request.head.method),
+                ctx.request.head.target,
                 ctx.response.status,
                 elapsed_ns,
                 ctx.getRequestId(),
-                ctx.ip_address orelse "unknown",
+                ip,
             },
         );
 
@@ -135,8 +138,8 @@ pub const LoggingMiddleware = struct {
     fn logSlowRequest(self: *LoggingMiddleware, ctx: *Context, elapsed_ns: i64) void {
         const elapsed_ms = @divTrunc(elapsed_ns, 1_000_000);
         std.log.warn("Slow request: {s} {s} - {d}ms - {s}", .{
-            ctx.method,
-            ctx.path,
+            @tagName(ctx.request.head.method),
+            ctx.request.head.target,
             elapsed_ms,
             ctx.getRequestId(),
         });
