@@ -3,16 +3,30 @@ const std = @import("std");
 // Counter for generating sequential IDs
 var request_counter: std.atomic.Value(u64) = std.atomic.Value(u64).init(0);
 
-/// Generate a unique request ID
-pub fn generateRequestId(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
+/// Generate a unique request ID.
+/// The returned slice is allocated and must be freed by the caller.
+///
+/// Example:
+/// ```zig
+/// const id = try utils.allocGenerateRequestId(allocator, io);
+/// defer allocator.free(id);
+/// ```
+pub fn allocGenerateRequestId(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
     _ = io; // Reserved for future use
     const counter = request_counter.fetchAdd(1, .monotonic);
     // Simple ID based on counter
     return std.fmt.allocPrint(allocator, "req-{d:0>10}", .{counter});
 }
 
-/// Generate a short random ID (8 chars)
-pub fn generateShortId(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
+/// Generate a short random ID (8 chars).
+/// The returned slice is allocated and must be freed by the caller.
+///
+/// Example:
+/// ```zig
+/// const id = try utils.allocGenerateShortId(allocator, io);
+/// defer allocator.free(id);
+/// ```
+pub fn allocGenerateShortId(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
     _ = io; // Reserved for future use
     const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     var buf: [8]u8 = undefined;
@@ -184,8 +198,15 @@ pub fn containsXss(input: []const u8) bool {
     return false;
 }
 
-/// Sanitize HTML to prevent XSS
-pub fn escapeHtml(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+/// Sanitize HTML to prevent XSS.
+/// The returned slice is allocated and must be freed by the caller.
+///
+/// Example:
+/// ```zig
+/// const escaped = try utils.allocEscapeHtml(allocator, input);
+/// defer allocator.free(escaped);
+/// ```
+pub fn allocEscapeHtml(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     var result = std.ArrayList(u8).init(allocator);
     defer result.deinit();
 

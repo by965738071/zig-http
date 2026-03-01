@@ -30,7 +30,7 @@ pub const Context = struct {
     request_id: ?[]const u8,
 
     pub fn init(allocator: std.mem.Allocator, server: *HTTPServer, request: *http.Server.Request, response: *Response, io: std.Io) !Context {
-        const request_id = utils.generateRequestId(allocator, io) catch |gen_err| blk: {
+        const request_id = utils.allocGenerateRequestId(allocator, io) catch |gen_err| blk: {
             std.log.warn("Failed to generate request ID: {}", .{gen_err});
             break :blk try allocator.dupe(u8, "unknown");
         };

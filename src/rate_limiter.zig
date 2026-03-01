@@ -95,10 +95,7 @@ pub const RateLimiter = struct {
     /// Clean up expired entries
     fn cleanup(limiter: *RateLimiter, now_ms: i64) void {
         var keys = std.ArrayList([]const u8).empty;
-        defer {
-            for (keys.items) |k| limiter.allocator.free(k);
-            keys.deinit(limiter.allocator);
-        }
+        defer keys.deinit(limiter.allocator);
 
         var it = limiter.clients.iterator();
         while (it.next()) |entry| {

@@ -195,7 +195,7 @@ pub fn main() !void {
     // Initialize server
     var server = try httpServer.init(allocator, .{
         .port = 8080,
-        .host = "127.0.0.1",
+        .host = "0.0.0.0",
     });
     server.setWebSocketServer(&ws_server);
     server.setStaticServer(&static_server);
