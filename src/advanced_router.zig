@@ -29,81 +29,97 @@ pub const RouteGroup = struct {
         handler: Handler,
         middlewares: std.ArrayList(*Middleware),
         is_regex: bool,
+        owns_path: bool = false, // Track if we need to free path
     };
 
     pub fn init(allocator: std.mem.Allocator, prefix: []const u8) RouteGroup {
         return .{
             .allocator = allocator,
             .prefix = allocator.dupe(u8, prefix) catch prefix,
-            .middlewares = std.ArrayList(*Middleware).init(allocator),
-            .routes = std.ArrayList(Route).init(allocator),
+            .middlewares = std.ArrayList(*Middleware){},
+            .routes = std.ArrayList(Route){},
         };
     }
 
     pub fn deinit(group: *RouteGroup) void {
         group.allocator.free(group.prefix);
-        group.middlewares.deinit();
-        group.routes.deinit();
+
+        // Clean up middlewares and paths in routes
+        for (group.routes.items) |*route| {
+            route.middlewares.deinit(group.allocator);
+            if (route.owns_path) {
+                group.allocator.free(route.path);
+            }
+        }
+
+        group.middlewares.deinit(group.allocator);
+        group.routes.deinit(group.allocator);
     }
 
     /// Add GET route
     pub fn get(group: *RouteGroup, path: []const u8, handler: Handler) !void {
-        try group.routes.append(.{
+        try group.routes.append(group.allocator,.{
             .method = .GET,
             .path = path,
             .handler = handler,
-            .middlewares = try group.middlewares.clone(),
+            .middlewares = try group.middlewares.clone(group.allocator),
             .is_regex = false,
         });
     }
 
     /// Add POST route
     pub fn post(group: *RouteGroup, path: []const u8, handler: Handler) !void {
-        try group.routes.append(.{
+        try group.routes.append(group.allocator,.{
             .method = .POST,
             .path = path,
             .handler = handler,
-            .middlewares = try group.middlewares.clone(),
+            .middlewares = try group.middlewares.clone(group.allocator),
             .is_regex = false,
         });
     }
 
     /// Add PUT route
     pub fn put(group: *RouteGroup, path: []const u8, handler: Handler) !void {
-        try group.routes.append(.{
+        try group.routes.append(group.allocator,.{
             .method = .PUT,
             .path = path,
             .handler = handler,
-            .middlewares = try group.middlewares.clone(),
+            .middlewares = try group.middlewares.clone(group.allocator),
             .is_regex = false,
         });
     }
 
     /// Add DELETE route
     pub fn delete(group: *RouteGroup, path: []const u8, handler: Handler) !void {
-        try group.routes.append(.{
+        try group.routes.append(group.allocator,.{
             .method = .DELETE,
             .path = path,
             .handler = handler,
-            .middlewares = try group.middlewares.clone(),
+            .middlewares = try group.middlewares.clone(group.allocator),
             .is_regex = false,
         });
     }
 
-    /// Add regex route
-    /// Note: Zig 0.16-dev does not have std.regex module yet
-    /// This is a placeholder for future regex support
+    /// Add regex route (simplified pattern matching)
+    /// Supports basic patterns:
+    ///   {name}      - matches any segment (e.g., /users/{id})
+    ///   {name:int}  - matches integers only
+    ///   {name:alpha} - matches alphabetic characters only
+    ///   *           - wildcard (matches any path)
     pub fn addRegex(group: *RouteGroup, method: http.Method, pattern: []const u8, handler: Handler) !void {
-        _ = group;
-        _ = method;
-        _ = pattern;
-        _ = handler;
-        @panic("Regex routes are not supported in Zig 0.16-dev yet (std.regex module not available)");
+        try group.routes.append(group.allocator, .{
+            .method = method,
+            .path = try group.allocator.dupe(u8, pattern),
+            .handler = handler,
+            .middlewares = try group.middlewares.clone(group.allocator),
+            .is_regex = true,
+            .owns_path = true, // We dupe'd the pattern, so we own it
+        });
     }
 
     /// Add middleware to group
     pub fn use(group: *RouteGroup, middleware: *Middleware) !void {
-        try group.middlewares.append(middleware);
+        try group.middlewares.append(group.allocator,middleware);
     }
 
     /// Apply prefix to all routes
@@ -111,7 +127,93 @@ pub const RouteGroup = struct {
         for (group.routes.items) |*route| {
             const full_path = try std.fmt.allocPrint(group.allocator, "{s}{s}", .{ group.prefix, route.path });
             route.path = full_path;
+            route.owns_path = true; // Mark that we own this path and need to free it
         }
+    }
+};
+
+/// Simple pattern matcher for routes (regex-lite)
+pub const PatternMatcher = struct {
+    /// Match a pattern against a path
+    /// Patterns can contain:
+    ///   {name}      - matches any segment
+    ///   {name:int}  - matches integers
+    ///   {name:alpha} - matches alphabetic characters
+    ///   *           - wildcard
+    pub fn matchPattern(pattern: []const u8, path: []const u8, params: ?*std.StringHashMap([]const u8)) !bool {
+        // Handle wildcard
+        if (std.mem.eql(u8, pattern, "*")) {
+            return true;
+        }
+
+        // Split both pattern and path into segments
+        var pattern_iter = std.mem.splitScalar(u8, pattern, '/');
+        var path_iter = std.mem.splitScalar(u8, path, '/');
+
+        while (true) {
+            const pattern_seg = pattern_iter.next();
+            const path_seg = path_iter.next();
+
+            // Both exhausted - match
+            if (pattern_seg == null and path_seg == null) {
+                break;
+            }
+
+            // Only one exhausted - no match
+            if (pattern_seg == null or path_seg == null) {
+                return false;
+            }
+
+            if (try matchSegment(pattern_seg.?, path_seg.?, params)) {
+                continue;
+            }
+
+            return false;
+        }
+
+        return true;
+    }
+
+    fn matchSegment(pattern: []const u8, segment: []const u8, params: ?*std.StringHashMap([]const u8)) !bool {
+        // Check for parameter pattern {name} or {name:type}
+        if (pattern.len > 2 and pattern[0] == '{' and pattern[pattern.len - 1] == '}') {
+            const inner = pattern[1 .. pattern.len - 1];
+            var type_iter = std.mem.splitScalar(u8, inner, ':');
+            const param_name = type_iter.first();
+            const param_type = type_iter.next() orelse "";
+
+            // Validate type if specified
+            if (param_type.len > 0) {
+                if (std.mem.eql(u8, param_type, "int")) {
+                    // Must be an integer
+                    const parsed = std.fmt.parseInt(i64, segment, 10) catch return false;
+                    _ = parsed;
+                } else if (std.mem.eql(u8, param_type, "alpha")) {
+                    // Must be alphabetic
+                    for (segment) |c| {
+                        if (!std.ascii.isAlphabetic(c)) return false;
+                    }
+                } else if (std.mem.eql(u8, param_type, "alnum")) {
+                    // Must be alphanumeric
+                    for (segment) |c| {
+                        if (!std.ascii.isAlphanumeric(c)) return false;
+                    }
+                }
+            }
+
+            // Store parameter if params map provided
+            if (params) |p| {
+                const allocator = p.allocator;
+                const name_copy = try allocator.dupe(u8, param_name);
+                const value_copy = try allocator.dupe(u8, segment);
+                try p.put(name_copy, value_copy);
+            }
+
+            return true;
+        }
+
+        // Exact match
+        return std.mem.eql(u8, pattern, segment);
     }
 };
 
@@ -128,6 +230,10 @@ pub const RouteValidator = struct {
     }
 
     pub fn deinit(validator: *RouteValidator) void {
+        var it = validator.validators.iterator();
+        while (it.next()) |entry| {
+            validator.allocator.free(entry.key_ptr.*);
+        }
         validator.validators.deinit();
     }
 

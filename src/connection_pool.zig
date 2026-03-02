@@ -22,18 +22,22 @@ const ConnState = enum {
 
 /// Pooled connection
 const PooledConnection = struct {
-    stream: std.net.Stream,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: std.Io.net.Stream,
     host: []const u8,
     port: u16,
     state: ConnState,
-    created_at: u64,
-    last_used: u64,
+    created_at: i64,
+    last_used: i64,
     ref_count: Atomic(u32),
 
-    pub fn init(stream: std.net.Stream, host: []const u8, port: u16) PooledConnection {
-        const now = std.time.nanoTimestamp();
+    pub fn init(allocator: std.mem.Allocator, stream: std.Io.net.Stream, io: std.Io, host: []const u8, port: u16) PooledConnection {
+        const now = std.Io.Timestamp.now(io, .boot).toMilliseconds();
         return .{
+            .allocator = allocator,
             .stream = stream,
+            .io = io,
             .host = host,
             .port = port,
             .state = .idle,
@@ -45,7 +49,7 @@ const PooledConnection = struct {
 
     pub fn close(self: *PooledConnection) void {
         if (self.state != .closed) {
-            self.stream.close();
+            self.stream.close(self.io);
             self.state = .closed;
         }
     }
@@ -63,11 +67,11 @@ const PooledConnection = struct {
     }
 
     pub fn isExpired(self: *PooledConnection, max_idle: u64, max_lifetime: u64) bool {
-        const now = std.time.nanoTimestamp();
-        const idle_time = (now - self.last_used) / 1_000_000; // Convert to ms
-        const lifetime = (now - self.created_at) / 1_000_000;
+        const now = std.Io.Timestamp.now(self.io, .boot).toMilliseconds();
+        const idle_time: i64 = @divTrunc(now - self.last_used, 1_000_000); // Convert to ms
+        const lifetime: i64 = @divTrunc(now - self.created_at, 1_000_000);
 
-        return idle_time > max_idle or lifetime > max_lifetime;
+        return idle_time > @as(i64, @intCast(max_idle)) or lifetime > @as(i64, @intCast(max_lifetime));
     }
 };
 
@@ -82,46 +86,48 @@ const PoolEntry = struct {
 pub const ConnectionPool = struct {
     config: PoolConfig,
     allocator: std.mem.Allocator,
+    io: std.Io,
     connections: std.StringHashMap(*PoolEntry), // Key: "host:port"
     idle_connections: std.ArrayList(*PooledConnection),
     cleanup_task: ?std.Thread,
     shutdown_requested: Atomic(bool),
-    mutex: std.Thread.Mutex,
-    cleanup_mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
+    cleanup_mutex: std.Io.Mutex,
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, config: PoolConfig) !Self {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, config: PoolConfig) !Self {
         return .{
             .config = config,
             .allocator = allocator,
+            .io = io,
             .connections = std.StringHashMap(*PoolEntry).init(allocator),
-            .idle_connections = std.ArrayList(*PooledConnection).init(allocator),
+            .idle_connections = std.ArrayList(*PooledConnection){},
             .cleanup_task = null,
             .shutdown_requested = Atomic(bool).init(false),
-            .mutex = std.Thread.Mutex{},
-            .cleanup_mutex = std.Thread.Mutex{},
+            .mutex = std.Io.Mutex.init,
+            .cleanup_mutex = std.Io.Mutex.init,
         };
     }
 
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: *Self) !void {
         self.shutdown();
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
 
         // Close all connections
         var it = self.connections.valueIterator();
-        while (it.next()) |entry| {
-            if (entry.connection) |conn| {
-                conn.close();
+        while (it.next()) |entry_ptr| {
+            if (entry_ptr.*.connection) |conn| {
+                conn.stream.close(self.io);
                 self.allocator.destroy(conn);
             }
-            self.allocator.destroy(entry.*);
+            self.allocator.destroy(entry_ptr.*);
         }
 
         self.connections.deinit();
-        self.idle_connections.deinit();
+        self.idle_connections.deinit(self.allocator);
     }
 
     /// Get a connection from the pool or create a new one
@@ -130,8 +136,8 @@ pub const ConnectionPool = struct {
         const key = try std.fmt.allocPrint(self.allocator, "{s}:{d}", .{ host, port });
         defer self.allocator.free(key);
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
 
         // Try to find existing idle connection
         if (self.connections.get(key)) |entry| {
@@ -142,7 +148,7 @@ pub const ConnectionPool = struct {
                 )) {
                     conn.state = .in_use;
                     conn.incrementRef();
-                    conn.last_used = std.time.nanoTimestamp();
+                    conn.last_used = std.Io.Timestamp.now(self.io, .boot).toMilliseconds();
 
                     // Remove from idle list
                     self.removeFromIdle(conn);
@@ -159,7 +165,7 @@ pub const ConnectionPool = struct {
 
         const stream = try self.connect(host, port);
         const conn = try self.allocator.create(PooledConnection);
-        conn.* = PooledConnection.init(stream, try self.allocator.dupe(u8, host), port);
+        conn.* = PooledConnection.init(self.allocator, stream, self.io, try self.allocator.dupe(u8, host), port);
 
         const entry = try self.allocator.create(PoolEntry);
         entry.* = .{
@@ -172,28 +178,28 @@ pub const ConnectionPool = struct {
 
         conn.state = .in_use;
         conn.incrementRef();
-        conn.last_used = std.time.nanoTimestamp();
+        conn.last_used = std.Io.Timestamp.now(self.io, .boot).toMilliseconds();
 
         return conn;
     }
 
     /// Release a connection back to the pool
     pub fn release(self: *Self, conn: *PooledConnection) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
 
         conn.decrementRef();
 
         if (conn.getRefCount() == 0) {
             conn.state = .idle;
-            conn.last_used = std.time.nanoTimestamp();
+            conn.last_used = std.Io.Timestamp.now(self.io, .boot).toMilliseconds();
 
             // Add to idle list
             if (self.idle_connections.items.len < self.config.max_idle_connections) {
-                self.idle_connections.append(conn) catch {};
+                self.idle_connections.append(self.allocator, conn) catch {};
             } else {
                 // Too many idle connections, close this one
-                conn.close();
+                conn.stream.close(self.io);
             }
         }
     }
@@ -209,20 +215,15 @@ pub const ConnectionPool = struct {
     }
 
     /// Establish a new connection
-    fn connect(self: *Self, host: []const u8, port: u16) !std.net.Stream {
-        const address = try std.net.Address.parseIp(host, port);
+    fn connect(self: *Self, host: []const u8, port: u16) !std.Io.net.Stream {
+        const address: std.Io.net.IpAddress = try std.Io.net.IpAddress.parse(host, port);
 
-        // Connect with timeout using tcp_connectToHost with custom timeout
-        const timeout_ns = self.config.connection_timeout * std.time.ns_per_ms;
-        const stream = try std.net.tcp.connectToHost(
-            self.allocator,
-            address,
-            timeout_ns,
-        );
+        // Connect with timeout (using none for no timeout)
+        const stream = try address.connect(self.io, .{ .mode = .stream, .protocol = .tcp, .timeout = .none });
 
         // Configure socket options
-        try stream.handle.setNoDelay(true); // Disable Nagle's algorithm
-        try stream.handle.setKeepAlive(true);
+        // try stream.handle.setNoDelay(true); // Disable Nagle's algorithm
+        // try stream.handle.setKeepAlive(true);
 
         return stream;
     }
@@ -249,20 +250,21 @@ pub const ConnectionPool = struct {
     }
 
     /// Cleanup task function
-    fn cleanupTaskFn(pool: *Self) void {
+    fn cleanupTaskFn(pool: *Self) !void {
         while (!pool.shutdown_requested.load(.monotonic)) {
-            std.time.sleep(pool.config.cleanup_interval * std.time.ns_per_ms);
+            try std.Io.Timeout.sleep(pool.config.cleanup_interval * std.time.ns_per_ms, pool.io);
+
             pool.cleanup();
         }
     }
 
     /// Cleanup expired connections
     pub fn cleanup(self: *Self) void {
-        self.cleanup_mutex.lock();
-        defer self.cleanup_mutex.unlock();
+        self.cleanup_mutex.lock(self.io);
+        defer self.cleanup_mutex.unlock(self.io);
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
 
         var i: usize = 0;
         while (i < self.idle_connections.items.len) {
@@ -284,26 +286,26 @@ pub const ConnectionPool = struct {
     pub fn shutdown(self: *Self) void {
         self.stopCleanupTask();
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lock(self.io) catch return;
+        defer self.mutex.unlock(self.io);
 
         var it = self.connections.valueIterator();
-        while (it.next()) |entry| {
-            if (entry.connection) |conn| {
+        while (it.next()) |entry_ptr| {
+            if (entry_ptr.*.connection) |conn| {
                 conn.close();
             }
         }
     }
 
     /// Get pool statistics
-    pub fn getStats(self: *Self) PoolStats {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+    pub fn getStats(self: *Self, io: std.Io) PoolStats {
+        self.mutex.lock(io);
+        defer self.mutex.unlock(io);
 
         var active: usize = 0;
         var it = self.connections.valueIterator();
-        while (it.next()) |entry| {
-            if (entry.connection) |conn| {
+        while (it.next()) |entry_ptr| {
+            if (entry_ptr.*.connection) |conn| {
                 if (conn.state == .in_use) {
                     active += 1;
                 }
@@ -416,16 +418,17 @@ pub const HttpResponse = struct {
 
 test "ConnectionPool basic usage" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
     const config = PoolConfig{
         .max_connections = 10,
         .max_idle_connections = 5,
     };
 
-    var pool = try ConnectionPool.init(allocator, config);
-    defer pool.deinit();
+    var pool = try ConnectionPool.init(allocator, io, config);
+    defer pool.deinit() catch {};
 
     // Try to acquire (will fail without actual server)
-    const result = pool.acquire("127.0.0.1", 8080);
+    const result = try pool.acquire("127.0.0.1", 8080);
 
     // In real scenario with server running:
     // if (result) |conn| {

@@ -17,15 +17,16 @@ const BufferHeader = struct {
     prev: ?*Buffer = null,
     size: usize,
     in_use: bool,
-    allocated_at: u64,
+    allocated_at: i96,
 };
 
 /// Managed buffer
 const Buffer = struct {
     header: BufferHeader,
     data: []u8,
+    io: std.Io,
 
-    pub fn init(allocator: std.mem.Allocator, size: usize) !Buffer {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, size: usize) !Buffer {
         const data = try allocator.alloc(u8, size);
         return .{
             .header = .{
@@ -33,9 +34,10 @@ const Buffer = struct {
                 .prev = null,
                 .size = size,
                 .in_use = false,
-                .allocated_at = std.time.nanoTimestamp(),
+                .allocated_at = std.Io.Timestamp.now(io, .boot).nanoseconds,
             },
             .data = data,
+            .io = io,
         };
     }
 
@@ -48,7 +50,8 @@ const Buffer = struct {
 pub const BufferManager = struct {
     config: BufferConfig,
     allocator: std.mem.Allocator,
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
+    io: std.Io,
 
     // Read buffers
     free_read_buffers: std.ArrayList(*Buffer),
@@ -66,15 +69,16 @@ pub const BufferManager = struct {
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, config: BufferConfig) BufferManager {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, config: BufferConfig) BufferManager {
         return .{
+            .io = io,
             .config = config,
             .allocator = allocator,
-            .mutex = std.Thread.Mutex{},
-            .free_read_buffers = std.ArrayList(*Buffer).init(allocator),
-            .used_read_buffers = std.ArrayList(*Buffer).init(allocator),
-            .free_write_buffers = std.ArrayList(*Buffer).init(allocator),
-            .used_write_buffers = std.ArrayList(*Buffer).init(allocator),
+            .mutex = std.Io.Mutex.init,
+            .free_read_buffers = std.ArrayList(*Buffer){},
+            .used_read_buffers = std.ArrayList(*Buffer){},
+            .free_write_buffers = std.ArrayList(*Buffer){},
+            .used_write_buffers = std.ArrayList(*Buffer){},
             .total_read_allocations = 0,
             .total_write_allocations = 0,
             .total_read_reuses = 0,
@@ -111,8 +115,8 @@ pub const BufferManager = struct {
 
     /// Acquire a read buffer
     pub fn acquireReadBuffer(self: *Self) ![]u8 {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
 
         if (!self.config.enable_buffer_pooling) {
             return self.allocator.alloc(u8, self.config.read_buffer_size);
@@ -131,7 +135,7 @@ pub const BufferManager = struct {
         // Allocate new buffer if under limit
         if (self.used_read_buffers.items.len < self.config.max_read_buffers) {
             const buffer = try self.allocator.create(Buffer);
-            buffer.* = try Buffer.init(self.allocator, self.config.read_buffer_size);
+            buffer.* = try Buffer.init(self.allocator, self.io, self.config.read_buffer_size);
             buffer.header.in_use = true;
             try self.used_read_buffers.append(self.allocator, buffer);
             self.total_read_allocations += 1;
@@ -143,9 +147,9 @@ pub const BufferManager = struct {
     }
 
     /// Release a read buffer
-    pub fn releaseReadBuffer(self: *Self, data: []u8) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+    pub fn releaseReadBuffer(self: *Self, data: []u8) !void {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
 
         if (!self.config.enable_buffer_pooling) {
             self.allocator.free(data);
@@ -178,8 +182,8 @@ pub const BufferManager = struct {
 
     /// Acquire a write buffer
     pub fn acquireWriteBuffer(self: *Self) ![]u8 {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
 
         if (!self.config.enable_buffer_pooling) {
             return self.allocator.alloc(u8, self.config.write_buffer_size);
@@ -188,7 +192,7 @@ pub const BufferManager = struct {
         // Try to reuse a free buffer
         if (self.free_write_buffers.popOrNull()) |buffer| {
             buffer.header.in_use = true;
-            try self.used_write_buffers.append(buffer);
+            try self.used_write_buffers.append(self.allocator, buffer);
             self.total_write_reuses += 1;
             return buffer.data;
         }
@@ -198,7 +202,7 @@ pub const BufferManager = struct {
             const buffer = try self.allocator.create(Buffer);
             buffer.* = try Buffer.init(self.allocator, self.config.write_buffer_size);
             buffer.header.in_use = true;
-            try self.used_write_buffers.append(buffer);
+            try self.used_write_buffers.append(self.allocator, buffer);
             self.total_write_allocations += 1;
             return buffer.data;
         }
@@ -214,8 +218,8 @@ pub const BufferManager = struct {
             return;
         }
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
 
         // Find buffer in used list
         for (self.used_write_buffers.items, 0..) |buffer, i| {
@@ -225,7 +229,7 @@ pub const BufferManager = struct {
 
                 // Return to free list
                 if (self.free_write_buffers.items.len < self.config.max_write_buffers) {
-                    self.free_write_buffers.append(buffer) catch {
+                    self.free_write_buffers.append(self.allocator, buffer) catch {
                         buffer.deinit(self.allocator);
                         self.allocator.destroy(buffer);
                     };
@@ -242,8 +246,8 @@ pub const BufferManager = struct {
 
     /// Get statistics
     pub fn getStats(self: *Self) BufferStats {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lock(self.io) catch {};
+        defer self.mutex.unlock(self.io);
 
         return .{
             .free_read_buffers = self.free_read_buffers.items.len,
@@ -259,13 +263,13 @@ pub const BufferManager = struct {
 
     /// Reset buffer manager (release all used buffers)
     pub fn reset(self: *Self) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
 
         // Move all used buffers to free
         while (self.used_read_buffers.popOrNull()) |buffer| {
             buffer.header.in_use = false;
-            self.free_read_buffers.append(buffer) catch {
+            self.free_read_buffers.append(self.allocator, buffer) catch {
                 buffer.deinit(self.allocator);
                 self.allocator.destroy(buffer);
             };
@@ -273,7 +277,7 @@ pub const BufferManager = struct {
 
         while (self.used_write_buffers.popOrNull()) |buffer| {
             buffer.header.in_use = false;
-            self.free_write_buffers.append(buffer) catch {
+            self.free_write_buffers.append(self.allocator, buffer) catch {
                 buffer.deinit(self.allocator);
                 self.allocator.destroy(buffer);
             };
@@ -282,23 +286,23 @@ pub const BufferManager = struct {
 
     /// Pre-allocate buffers
     pub fn preallocate(self: *Self, read_count: usize, write_count: usize) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
 
         var i: usize = 0;
         while (i < read_count and self.free_read_buffers.items.len < self.config.max_read_buffers) : (i += 1) {
             const buffer = try self.allocator.create(Buffer);
-            buffer.* = try Buffer.init(self.allocator, self.config.read_buffer_size);
+            buffer.* = try Buffer.init(self.allocator, self.io, self.config.read_buffer_size);
             buffer.header.in_use = false;
-            try self.free_read_buffers.append(buffer);
+            try self.free_read_buffers.append(self.allocator, buffer);
         }
 
         i = 0;
         while (i < write_count and self.free_write_buffers.items.len < self.config.max_write_buffers) : (i += 1) {
             const buffer = try self.allocator.create(Buffer);
-            buffer.* = try Buffer.init(self.allocator, self.config.write_buffer_size);
+            buffer.* = try Buffer.init(self.allocator, self.io, self.config.write_buffer_size);
             buffer.header.in_use = false;
-            try self.free_write_buffers.append(buffer);
+            try self.free_write_buffers.append(self.allocator, buffer);
         }
     }
 };
@@ -335,10 +339,11 @@ pub fn RingBuffer(comptime T: type) type {
         tail: usize,
         capacity: usize,
         allocator: std.mem.Allocator,
+        io: std.Io,
 
         const Self = @This();
 
-        pub fn init(allocator: std.mem.Allocator, capacity: usize) !Self {
+        pub fn init(allocator: std.mem.Allocator, io: std.Io, capacity: usize) !Self {
             const data = try allocator.alloc(T, capacity);
             return .{
                 .data = data,
@@ -346,6 +351,7 @@ pub fn RingBuffer(comptime T: type) type {
                 .tail = 0,
                 .capacity = capacity,
                 .allocator = allocator,
+                .io = io,
             };
         }
 
@@ -475,8 +481,9 @@ test "BufferManager basic usage" {
         .max_read_buffers = 5,
         .max_write_buffers = 5,
     };
+    const io = std.testing.io;
 
-    var manager = BufferManager.init(allocator, config);
+    var manager = BufferManager.init(allocator, io, config);
     defer manager.deinit();
 
     // Pre-allocate
@@ -491,7 +498,7 @@ test "BufferManager basic usage" {
     try std.testing.expect(read_buf.len == 1024);
 
     // Release read buffer
-    manager.releaseReadBuffer(read_buf);
+    try manager.releaseReadBuffer(read_buf);
 
     // Check reuse stats
     const final_stats = manager.getStats();
@@ -500,7 +507,7 @@ test "BufferManager basic usage" {
 
 test "RingBuffer" {
     const allocator = std.testing.allocator;
-    var ring = try RingBuffer(u8).init(allocator, 10);
+    var ring = try RingBuffer(u8).init(allocator, std.testing.io, 10);
     defer ring.deinit();
 
     const data = "Hello";

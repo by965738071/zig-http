@@ -72,8 +72,9 @@ pub const HTTPClient = struct {
         const parsed = try self.parseURL(url);
         
         // Connect to server
-        const address = try std.net.Address.parseIp4(parsed.host, parsed.port);
-        var stream = try address.connect(self.io);
+        const address = try std.Io.net.IpAddress.parseIp4(parsed.host, parsed.port);
+        // const address = try std.net.Address.parseIp4(parsed.host, parsed.port);
+        var stream = try address.connect(self.io, .{});
         defer stream.close(self.io);
 
         // Create buffers
@@ -129,15 +130,16 @@ pub const HTTPClient = struct {
         }
 
         // Read response body
-        var response_body = std.ArrayList(u8).init(self.allocator, {});
+        var response_body = std.ArrayList(u8) {};
         defer response_body.deinit();
 
-        const reader = result.reader();
+        const reader:std.http.Reader = result.reader();
+        const reader_io = reader.interface;
         var buffer: [4096]u8 = undefined;
         while (true) {
-            const bytes_read = try reader.readAll(&buffer);
+            const bytes_read = try reader_io.readSliceShort(&buffer);
             if (bytes_read == 0) break;
-            try response_body.appendSlice(buffer[0..bytes_read]);
+            try response_body.appendSlice(self.allocator,buffer[0..bytes_read]);
         }
 
         return HTTPResponse{
@@ -150,7 +152,7 @@ pub const HTTPClient = struct {
 
     /// Clone headers from HTTP response
     fn cloneHeaders(self: *HTTPClient, http_headers: std.http.HeaderList) !std.ArrayList(http.Header) {
-        var headers = std.ArrayList(http.Header).init(self.allocator);
+        var headers = std.ArrayList(http.Header).empty;
         
         var it = http_headers.iterator();
         while (it.next()) |entry| {
@@ -158,7 +160,7 @@ pub const HTTPClient = struct {
             errdefer self.allocator.free(name);
             const value = try self.allocator.dupe(u8, entry.value);
             errdefer self.allocator.free(value);
-            try headers.append(.{ .name = name, .value = value });
+            try headers.append(self.allocator,.{ .name = name, .value = value });
         }
 
         return headers;
@@ -212,7 +214,7 @@ pub const HTTPResponse = struct {
             self.allocator.free(h.name);
             self.allocator.free(h.value);
         }
-        self.headers.deinit();
+        self.headers.deinit(self.allocator);
         self.allocator.free(self.body);
     }
 
