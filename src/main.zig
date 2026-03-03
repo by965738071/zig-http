@@ -97,7 +97,7 @@ pub fn main() !void {
     defer logger.deinit();
 
     // Initialize Session Manager
-    var session_store = MemorySessionStore.init(allocator);
+    var session_store = MemorySessionStore.init(allocator,io);
     defer session_store.deinit();
     var session_manager = SessionManager.init(allocator,io, &session_store, .{
         .secret = "secret-key-12345",
@@ -581,7 +581,7 @@ fn handleSession(ctx: *Context) !void {
         const jar = ctx.getCookieJar();
         const session_id_opt = jar.get("session_id");
 
-        const session = try sm.get(session_id_opt,ctx.io);
+        const session = try sm.get(session_id_opt);
 
         // Set visit count
         const visits_str = session.get("visits") orelse "0";
@@ -589,7 +589,7 @@ fn handleSession(ctx: *Context) !void {
         var buf: [16]u8 = undefined;
         const new_visits = std.fmt.bufPrint(&buf, "{d}", .{visits + 1}) catch "1";
         try session.set("visits", new_visits);
-        try sm.save(session, ctx.io);
+        try sm.save(session);
 
         // Set session cookie
         const cookie = try sm.createCookie(session.id);

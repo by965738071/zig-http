@@ -22,9 +22,10 @@ pub const TraceContext = struct {
 pub const TracingMiddleware = struct {
     config: TracingConfig,
     allocator: std.mem.Allocator,
+    io: std.Io,
 
-    pub fn init(allocator: std.mem.Allocator, config: TracingConfig) TracingMiddleware {
-        return .{ .config = config, .allocator = allocator };
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, config: TracingConfig) TracingMiddleware {
+        return .{ .config = config, .allocator = allocator, .io = io };
     }
 
     pub fn process(
@@ -54,8 +55,8 @@ pub const TracingMiddleware = struct {
         try ctx.setState("trace_context", try self.serializeTraceContext(ctx.allocator, &trace_context));
 
         // Set response headers for distributed tracing
-        try ctx.setHeader("X-Trace-ID", trace_id);
-        try ctx.setHeader("X-Span-ID", span_id);
+        try ctx.response.setHeader("X-Trace-ID", trace_id);
+        try ctx.response.setHeader("X-Span-ID", span_id);
 
         std.log.debug("Trace: {s} Span: {s}", .{ trace_id, span_id });
 
@@ -86,7 +87,7 @@ pub const TracingMiddleware = struct {
         self: *TracingMiddleware,
     ) ![]const u8 {
         const utils = @import("../utils.zig");
-        return utils.generateShortId(self.allocator);
+        return utils.allocGenerateShortId(self.allocator, self.io);
     }
 
     fn serializeTraceContext(self: *TracingMiddleware, trace: *const TraceContext) ![]const u8 {

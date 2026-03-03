@@ -231,7 +231,7 @@ pub const SessionManager = struct {
             }
         }
 
-        const id_copy = try manager.generateSessionId(manager.io);
+        const id_copy = try manager.generateSessionId();
         errdefer manager.allocator.free(id_copy);
 
         const session = try manager.allocator.create(Session);

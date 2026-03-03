@@ -67,14 +67,14 @@ pub const CacheMiddleware = struct {
 
         // Check for cache hit
         if (self.getFromCache(ctx)) |data| {
-            try ctx.setHeader("X-Cache", "HIT");
-            try ctx.setHeader("Content-Type", data.content_type);
-            try ctx.write(data.data);
+            try ctx.response.setHeader("X-Cache", "HIT");
+            try ctx.response.setHeader("Content-Type", data.content_type);
+            try ctx.response.write(data.data);
             return .respond;
         }
 
         // Set cache miss header
-        try ctx.setHeader("X-Cache", "MISS");
+        try ctx.response.setHeader("X-Cache", "MISS");
 
         return .@"continue";
     }
@@ -86,12 +86,13 @@ pub const CacheMiddleware = struct {
         const now_ns = std.Io.Timestamp.now(self.io, .boot).nanoseconds;
 
         // Get entry from cache
-        const entry = self.cache.get(ctx.path) orelse return null;
+        const path = ctx.request.head.target;
+        const entry = self.cache.get(path) orelse return null;
 
         // Check if entry has expired
         if (now_ns > entry.expires_at_ns) {
             // Remove expired entry
-            self.cache.remove(ctx.path);
+            self.cache.remove(path);
             self.freeEntry(entry);
             return null;
         }
@@ -147,7 +148,7 @@ pub const CacheMiddleware = struct {
         });
     }
 
-    fn evictOldest(self: *CacheMiddleware, allocator: std.mem.Allocator) void {
+    fn evictOldest(self: *CacheMiddleware) void {
         var oldest_entry: ?*const CacheEntry = null;
         var oldest_key: ?[]const u8 = null;
 
@@ -174,7 +175,7 @@ pub const CacheMiddleware = struct {
         self.allocator.destroy(entry);
     }
 
-    pub fn clearExpired(self: *CacheMiddleware, allocator: std.mem.Allocator) void {
+    pub fn clearExpired(self: *CacheMiddleware) void {
         self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
 
@@ -186,7 +187,7 @@ pub const CacheMiddleware = struct {
         var it = self.cache.iterator();
         while (it.next()) |entry| {
             if (now_ns > entry.value_ptr.*.expires_at_ns) {
-                keys_to_remove.append(self.allocator,entry.key_ptr.*) catch {};
+                keys_to_remove.append(self.allocator, entry.key_ptr.*) catch {};
             }
         }
 
