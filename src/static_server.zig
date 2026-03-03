@@ -455,12 +455,16 @@ pub const StaticServer = struct {
 
     /// Handle static file request
     pub fn handle(server: *StaticServer, ctx: *Context) !bool {
+        // Remove query string from target
+        const target_no_query = mem.indexOfScalar(u8, ctx.request.head.target, '?') orelse ctx.request.head.target.len;
+        const clean_target = ctx.request.head.target[0..target_no_query];
+
         // Remove prefix from URL path
         const url_path = if (server.config.prefix.len > 0 and
-            mem.startsWith(u8, ctx.request.head.target, server.config.prefix))
-            ctx.request.head.target[server.config.prefix.len..]
+            mem.startsWith(u8, clean_target, server.config.prefix))
+            clean_target[server.config.prefix.len..]
         else
-            ctx.request.head.target;
+            clean_target;
 
         // Resolve safe file path
         const file_path = resolvePath(server, url_path) catch {

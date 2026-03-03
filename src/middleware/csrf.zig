@@ -11,6 +11,7 @@ pub const CSRFMiddleware = struct {
     cookie_name: []const u8,
     header_name: []const u8,
     enabled: bool,
+    skip_paths: std.StringHashMap(void),
 
     const TokenData = struct {
         value: []const u8,
@@ -35,6 +36,7 @@ pub const CSRFMiddleware = struct {
             .cookie_name = try allocator.dupe(u8, options.cookie_name),
             .header_name = try allocator.dupe(u8, options.header_name),
             .enabled = options.enabled,
+            .skip_paths = std.StringHashMap(void).init(allocator),
         };
         return self;
     }
@@ -42,6 +44,15 @@ pub const CSRFMiddleware = struct {
     pub fn process(self: *CSRFMiddleware, ctx: *Context, io: std.Io) !Middleware.NextAction {
         _ = io;
         if (!self.enabled) {
+            return Middleware.NextAction.@"continue";
+        }
+
+        // Check if path should be skipped (remove query string)
+        const target = ctx.request.head.target;
+        const path_no_query = std.mem.indexOfScalar(u8, target, '?') orelse target.len;
+        const clean_path = target[0..path_no_query];
+
+        if (self.skip_paths.get(clean_path) != null) {
             return Middleware.NextAction.@"continue";
         }
 
@@ -152,7 +163,17 @@ pub const CSRFMiddleware = struct {
         return null;
     }
 
+    pub fn skipPath(self: *CSRFMiddleware, path: []const u8) !void {
+        const path_copy = try self.allocator.dupe(u8, path);
+        try self.skip_paths.put(path_copy, {});
+    }
+
     pub fn deinit(self: *CSRFMiddleware) void {
+        var it = self.skip_paths.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.skip_paths.deinit();
         self.allocator.free(self.secret);
         self.allocator.free(self.cookie_name);
         self.allocator.free(self.header_name);

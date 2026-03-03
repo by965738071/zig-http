@@ -109,7 +109,11 @@ pub const Router = struct {
     pub fn findRoute(router: *Router, method: http.Method, path: []const u8) !?Route {
         var params = ParamList.init(router.allocator);
 
-        var trimmed_path = std.mem.trim(u8, path, "/");
+        // Remove query string from path
+        const path_no_query = std.mem.indexOfScalar(u8, path, '?') orelse path.len;
+        const clean_path = path[0..path_no_query];
+
+        var trimmed_path = std.mem.trim(u8, clean_path, "/");
         if (trimmed_path.len == 0) {
             if (router.root.handler) |handler| {
                 return .{

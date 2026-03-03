@@ -97,9 +97,9 @@ pub fn main() !void {
     defer logger.deinit();
 
     // Initialize Session Manager
-    var session_store = MemorySessionStore.init(allocator,io);
+    var session_store = MemorySessionStore.init(allocator, io);
     defer session_store.deinit();
-    var session_manager = SessionManager.init(allocator,io, &session_store, .{
+    var session_manager = SessionManager.init(allocator, io, &session_store, .{
         .secret = "secret-key-12345",
     });
 
@@ -126,10 +126,10 @@ pub fn main() !void {
         .output_format = .json,
         .log_level = .info,
         .include_request_id = true,
-        
+
         .include_ip_address = true,
         .include_user_agent = true,
-    },io);
+    }, io);
 
     // Initialize Prometheus Exporter (depends on metrics, initialized after)
     // Will be set up after metrics is created
@@ -227,6 +227,8 @@ pub fn main() !void {
         .token_lifetime_sec = 3600,
     });
     defer csrf_middleware.deinit();
+    try csrf_middleware.skipPath("/api/submit");
+    try csrf_middleware.skipPath("/api/upload");
     server.use(&csrf_middleware.middleware);
 
     var auth_middleware = try AuthMiddleware.init(allocator, "my-secret-token");
@@ -457,7 +459,6 @@ fn handleSubmit(ctx: *Context) !void {
                     .message = "Failed to parse JSON",
                     .error_val = @errorName(err),
                 });
-                return;
             };
 
             if (parser.getJSON()) |json| {
