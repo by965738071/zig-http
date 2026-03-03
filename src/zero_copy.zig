@@ -19,7 +19,6 @@ const builtin = @import("builtin");
 ///   - Contended: ~1-10 μs (futex system call)
 ///   - Memory: 4 bytes (u32)
 /// ============================================================================
-
 /// Mutex state enumeration
 pub const MutexState = enum(u32) {
     /// Lock is available for acquisition
@@ -70,8 +69,8 @@ pub const Mutex = extern struct {
             .acquire,
             .monotonic,
         ) orelse {
-            @branchHint(.likely);  // Hint: lock is usually uncontended
-            return;  // Successfully acquired lock
+            @branchHint(.likely); // Hint: lock is usually uncontended
+            return; // Successfully acquired lock
         };
 
         // Slow path: Lock was contended, use futex for waiting
@@ -124,10 +123,10 @@ pub const Mutex = extern struct {
     /// Wakeup strategy: Wake only one waiter (fair FIFO behavior)
     pub fn unlock(m: *Mutex) void {
         switch (m.state.swap(.unlocked, .release)) {
-            .unlocked => unreachable,  // Programming error: unlock unlocked mutex
-            .locked_once => {},       // No waiters, no need to wake
+            .unlocked => unreachable, // Programming error: unlock unlocked mutex
+            .locked_once => {}, // No waiters, no need to wake
             .contended => {
-                @branchHint(.unlikely);  // Hint: contention is less common
+                @branchHint(.unlikely); // Hint: contention is less common
                 // Wake exactly one waiting thread
                 m.futexWake(1);
             },
@@ -173,7 +172,7 @@ pub const Mutex = extern struct {
             while (attempts < max_attempts) : (attempts += 1) {
                 const current = @atomicLoad(MutexState, ptr, .acquire);
                 if (current != expected) {
-                    return;  // State changed, no need to wait
+                    return; // State changed, no need to wait
                 }
 
                 // Yield to scheduler (platform-specific)
@@ -208,7 +207,7 @@ pub const Mutex = extern struct {
                     null,
                 );
 
-                _ = rc;  // Ignore result, retry on spurious wakeups
+                _ = rc; // Ignore result, retry on spurious wakeups
             }
         } else {
             // Fallback: Spin wait for other platforms
@@ -396,7 +395,7 @@ pub const Condition = struct {
             const current_epoch = cond.epoch.load(.acquire);
 
             if (current_epoch != my_epoch) {
-                return;  // Signal received
+                return; // Signal received
             }
 
             std.atomic.spinLoopHint();
@@ -434,7 +433,7 @@ pub const RwLock = struct {
     state: std.atomic.Value(u32),
 
     /// Maximum readers supported
-    pub const max_readers: u32 = 0x7FFFFFFF;  // 31 bits for readers
+    pub const max_readers: u32 = 0x7FFFFFFF; // 31 bits for readers
 
     pub const init: RwLock = .{ .state = .init(0) };
 
@@ -452,7 +451,7 @@ pub const RwLock = struct {
                 const new_value = current + 1;
                 if (rw.state.cmpxchgWeak(current, new_value, .acquire, .monotonic)) |actual| {
                     if (actual == current) {
-                        return;  // Successfully acquired read lock
+                        return; // Successfully acquired read lock
                     }
                 }
             }
@@ -487,7 +486,7 @@ pub const RwLock = struct {
                 const new_value = writer_bit;
                 if (rw.state.cmpxchgWeak(current, new_value, .acquire, .monotonic)) |actual| {
                     if (actual == current) {
-                        return;  // Successfully acquired write lock
+                        return; // Successfully acquired write lock
                     }
                 }
             }
@@ -553,7 +552,7 @@ pub const SpinLock = struct {
 
         while (attempts < max_spin) : (attempts += 1) {
             if (s.flag.swap(1, .acquire) == 0) {
-                return;  // Acquired
+                return; // Acquired
             }
 
             // Hint to CPU that we're spinning
@@ -692,16 +691,16 @@ pub const ZeroCopyResponse = struct {
     pub fn init(allocator: std.mem.Allocator) ZeroCopyResponse {
         return .{
             .status_line = BufferView{ .ptr = null, .len = 0 },
-            .headers = std.ArrayList(BufferView).init(allocator),
+            .headers = std.ArrayList(BufferView){},
             .allocator = allocator,
-            .body = std.ArrayList(BufferView).init(allocator),
+            .body = std.ArrayList(BufferView){},
             .body_len = 0,
         };
     }
 
     pub fn deinit(self: *ZeroCopyResponse) void {
-        self.headers.deinit();
-        self.body.deinit();
+        self.headers.deinit(self.allocator);
+        self.body.deinit(self.allocator);
     }
 
     /// Set status line
@@ -716,7 +715,7 @@ pub const ZeroCopyResponse = struct {
 
     /// Add body data (zero-copy)
     pub fn appendBody(self: *ZeroCopyResponse, data: []const u8) !void {
-        try self.body.append(BufferView.fromSlice(data));
+        try self.body.append(self.allocator, BufferView.fromSlice(data));
         self.body_len += data.len;
     }
 
@@ -756,17 +755,20 @@ pub const ZeroCopyResponse = struct {
 /// Reads files into memory-mapped buffers when possible
 pub const ZeroCopyFileReader = struct {
     allocator: std.mem.Allocator,
-    file: std.fs.File,
+    io: std.Io,
+    file: std.Io.File,
     mapping: ?[]align(std.mem.page_size) u8,
     file_size: usize,
 
-    pub fn open(allocator: std.mem.Allocator, path: []const u8) !ZeroCopyFileReader {
-        const file = try std.fs.cwd().openFile(path, .{});
-        const stat = try file.stat();
+    pub fn open(allocator: std.mem.Allocator, path: []const u8, io: std.Io) !ZeroCopyFileReader {
+        const file = try std.Io.Dir.openFile(std.Io.Dir.cwd(), io, path, .{});
+        //const file = try std.fs.cwd().openFile(path, .{});
+        const stat = try file.stat(io);
         const file_size = @as(usize, @intCast(stat.size));
 
         return .{
             .allocator = allocator,
+            .io = io,
             .file = file,
             .mapping = null,
             .file_size = file_size,
@@ -778,7 +780,7 @@ pub const ZeroCopyFileReader = struct {
             std.posix.munmap(m);
             self.mapping = null;
         }
-        self.file.close();
+        self.file.close(self.io);
     }
 
     /// Get file content (zero-copy using mmap if supported)
@@ -795,7 +797,9 @@ pub const ZeroCopyFileReader = struct {
             ) catch {
                 // Fallback to regular read
                 const buffer = try self.allocator.alloc(u8, self.file_size);
-                const n = try self.file.readAll(buffer);
+                const reader: std.Io.Reader = try self.file.reader(self.io, buffer).interface;
+                const n = try reader.readSliceShort(buffer);
+
                 return buffer[0..n];
             };
         }
@@ -1082,7 +1086,7 @@ test "ReentrantMutex thread safety" {
 
     // Main thread acquires lock
     try mutex.lock();
-    counter.* += 1;  // Counter = 1
+    counter.* += 1; // Counter = 1
 
     // Signal worker to start
     start_event.store(true, .release);
@@ -1110,7 +1114,7 @@ test "RwLock multiple readers" {
             while (!finished.load(.acquire)) {
                 try rw.readLock();
                 const value = count.*;
-                std.debug.assert(value >= 0);  // Just ensure we can read
+                std.debug.assert(value >= 0); // Just ensure we can read
                 rw.readUnlock();
 
                 std.atomic.spinLoopHint();
@@ -1149,7 +1153,7 @@ test "RwLock write exclusivity" {
 
     const WriterWorker = struct {
         fn worker(rw: *RwLock, count: *usize, start: *std.atomic.Value(bool), finished: *std.atomic.Value(bool)) !void {
-            _ = start;  // Wait for start signal before beginning
+            _ = start; // Wait for start signal before beginning
             while (!finished.load(.acquire)) {
                 try rw.writeLock();
                 count.* += 1;

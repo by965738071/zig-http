@@ -99,7 +99,7 @@ pub fn main() !void {
     // Initialize Session Manager
     var session_store = MemorySessionStore.init(allocator);
     defer session_store.deinit();
-    var session_manager = SessionManager.init(allocator, &session_store, .{
+    var session_manager = SessionManager.init(allocator,io, &session_store, .{
         .secret = "secret-key-12345",
     });
 

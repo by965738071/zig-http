@@ -4,15 +4,15 @@ const SameSite = @import("cookie.zig").SameSite;
 
 /// Session data
 pub const Session = struct {
-    io:std.Io,
+    io: std.Io,
     id: []const u8,
     data: std.StringHashMap([]const u8),
     created_at: i64,
     updated_at: i64,
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, session_id: []const u8,io:std.Io) Session {
-        const now = std.Io.Timestamp.now(io,.boot).toMilliseconds();
+    pub fn init(allocator: std.mem.Allocator, session_id: []const u8, io: std.Io) Session {
+        const now = std.Io.Timestamp.now(io, .boot).toMilliseconds();
         return .{
             .io = io,
             .id = session_id,
@@ -40,7 +40,7 @@ pub const Session = struct {
         const key_copy = try session.allocator.dupe(u8, key);
         const value_copy = try session.allocator.dupe(u8, value);
         try session.data.put(key_copy, value_copy);
-        session.updated_at = std.Io.Timestamp.now(session.io,.boot).toMilliseconds();
+        session.updated_at = std.Io.Timestamp.now(session.io, .boot).toMilliseconds();
     }
 
     pub fn remove(session: *Session, key: []const u8) void {
@@ -68,15 +68,17 @@ pub const SessionConfig = struct {
 
 /// In-memory session store
 pub const MemorySessionStore = struct {
+    io: std.Io,
     allocator: std.mem.Allocator,
     sessions: std.StringHashMap(*Session),
     mutex: std.Io.Mutex,
     cleanup_interval_ns: u64 = 300 * 1_000_000_000, // 5 minutes
     running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
-    pub fn init(allocator: std.mem.Allocator) MemorySessionStore {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) MemorySessionStore {
         return .{
             .allocator = allocator,
+            .io = io,
             .sessions = std.StringHashMap(*Session).init(allocator),
             .mutex = std.Io.Mutex.init,
         };
@@ -120,8 +122,8 @@ pub const MemorySessionStore = struct {
         store.mutex.lockUncancelable(io);
         defer store.mutex.unlock(io);
 
-        const now = std.Io.now(io, .monotonic).toMilliseconds();
-        var keys = std.ArrayList([]const u8).init(store.allocator);
+        const now = std.Io.Timestamp.now(io, .boot).toMilliseconds();
+        var keys = std.ArrayList([]const u8){};
         defer {
             for (keys.items) |k| store.allocator.free(k);
             keys.deinit(store.allocator);
@@ -170,7 +172,7 @@ pub const MemorySessionStore = struct {
     /// Non-blocking cleanup using tryLock (for use in background threads)
     fn cleanupNonBlocking(store: *MemorySessionStore, max_age: i64) void {
         if (!store.mutex.tryLock()) return;
-        defer store.mutex.unlock(undefined); // unlock doesn't need io in practice
+        defer store.mutex.unlock(store.io); // unlock doesn't need io in practice
 
         const now = std.time.milliTimestamp();
         var it = store.sessions.iterator();
@@ -197,11 +199,13 @@ pub const MemorySessionStore = struct {
 /// Session manager
 pub const SessionManager = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     store: *MemorySessionStore,
     config: SessionConfig,
 
-    pub fn init(allocator: std.mem.Allocator, store: *MemorySessionStore, config: SessionConfig) SessionManager {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, store: *MemorySessionStore, config: SessionConfig) SessionManager {
         return .{
+            .io = io,
             .allocator = allocator,
             .store = store,
             .config = config,
@@ -209,44 +213,46 @@ pub const SessionManager = struct {
     }
 
     /// Generate session ID
-    pub fn generateSessionId(manager: SessionManager, io: std.Io) ![]const u8 {
+    pub fn generateSessionId(
+        manager: *SessionManager,
+    ) ![]const u8 {
         var bytes: [32]u8 = undefined;
-        io.random(&bytes);
+        manager.io.random(&bytes);
         var buf: [64]u8 = undefined;
         const hex = std.fmt.bufPrint(&buf, "{x}", .{bytes}) catch unreachable;
         return manager.allocator.dupe(u8, hex);
     }
 
     /// Get or create session
-    pub fn get(manager: *SessionManager, session_id: ?[]const u8, io: std.Io) !*Session {
+    pub fn get(manager: *SessionManager, session_id: ?[]const u8) !*Session {
         if (session_id) |sid| {
-            if (manager.store.get(sid, io)) |session| {
+            if (manager.store.get(sid, manager.io)) |session| {
                 return session;
             }
         }
 
-        const id_copy = try manager.generateSessionId(io);
+        const id_copy = try manager.generateSessionId(manager.io);
         errdefer manager.allocator.free(id_copy);
 
         const session = try manager.allocator.create(Session);
-        session.* = Session.init(manager.allocator, id_copy,io);
-        try manager.store.set(session, io);
+        session.* = Session.init(manager.allocator, id_copy, manager.io);
+        try manager.store.set(session, manager.io);
 
         return session;
     }
 
     /// Save session
-    pub fn save(manager: SessionManager, session: *Session, io: std.Io) !void {
-        try manager.store.set(session, io);
+    pub fn save(manager: *SessionManager, session: *Session) !void {
+        try manager.store.set(session, manager.io);
     }
 
     /// Destroy session
-    pub fn destroy(manager: *SessionManager, session_id: []const u8, io: std.Io) void {
-        manager.store.destroy(session_id, io);
+    pub fn destroy(manager: *SessionManager, session_id: []const u8) void {
+        manager.store.destroy(session_id, manager.io);
     }
 
     /// Create session cookie
-    pub fn createCookie(manager: SessionManager, session_id: []const u8) !Cookie {
+    pub fn createCookie(manager: *SessionManager, session_id: []const u8) !Cookie {
         return .{
             .name = manager.config.cookie_name,
             .value = session_id,
@@ -262,18 +268,19 @@ pub const SessionManager = struct {
 
 test "memory session store" {
     const allocator = std.testing.allocator;
-    var store = MemorySessionStore.init(allocator);
+    const io = std.testing.io;
+    var store = MemorySessionStore.init(allocator, io);
     defer store.deinit();
 
-    var session = Session.init(allocator, "test123");
+    var session = Session.init(allocator, "test123", io);
     defer session.deinit();
 
     try session.set("user", "john");
     try session.set("role", "admin");
 
-    try store.set(&session);
+    try store.set(&session, io);
 
-    const retrieved = store.get("test123").?;
+    const retrieved = store.get("test123", io).?;
     defer retrieved.deinit();
 
     try std.testing.expectEqualStrings("john", retrieved.get("user").?);
@@ -282,22 +289,25 @@ test "memory session store" {
 
 /// File-based session store for persistence
 pub const FileSessionStore = struct {
-    dir: std.fs.Dir,
+    dir: std.Io.Dir,
     allocator: std.mem.Allocator,
+    io: std.Io,
     in_memory_store: MemorySessionStore,
 
-    pub fn init(allocator: std.mem.Allocator, dir_path: []const u8) !FileSessionStore {
-        const dir = try std.fs.cwd().makeOpenPath(dir_path, .{});
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, dir_path: []const u8) !FileSessionStore {
+        const dir = try std.Io.Dir.openDir(std.Io.Dir.cwd(), io, dir_path, .{});
+
         return .{
+            .io = io,
             .dir = dir,
             .allocator = allocator,
-            .in_memory_store = MemorySessionStore.init(allocator),
+            .in_memory_store = MemorySessionStore.init(allocator, io),
         };
     }
 
     pub fn deinit(store: *FileSessionStore) void {
         store.in_memory_store.deinit();
-        store.dir.close();
+        store.dir.close(store.io);
     }
 
     pub fn get(store: *FileSessionStore, session_id: []const u8) ?*Session {
@@ -342,7 +352,7 @@ pub const FileSessionStore = struct {
         const file = try store.dir.createFile(file_path, .{ .read = true });
         defer file.close();
 
-        const writer = file.writer();
+        const writer = file.writer().interface;
 
         try writer.print("{{", .{});
         try writer.print("\"id\":\"{s}\",", .{session.id});
@@ -374,13 +384,15 @@ pub const FileSessionStore = struct {
             std.log.debug("Failed to open session file: {}", .{err});
             return null;
         };
-        defer file.close();
+        defer file.close(store.io);
 
-        const stat = file.stat() catch return null;
+        const stat = file.stat(store.io) catch return null;
         const content = store.allocator.alloc(u8, @intCast(stat.size)) catch return null;
         defer store.allocator.free(content);
 
-        _ = file.readAll(content) catch return null;
+        const reader = file.reader(store.io, &content).interface;
+        _ = reader.readSliceAll(&content) catch return null;
+        // _ = file.readAll(content) catch return null;
 
         // Simple JSON parsing (in production, use proper JSON parser)
         // For now, return null to indicate parsing failed

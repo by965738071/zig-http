@@ -176,7 +176,7 @@ pub const ChatRoom = struct {
 
     pub fn init(allocator: std.mem.Allocator) ChatRoom {
         return .{
-            .clients = std.ArrayList(*WebSocketContext).init(allocator),
+            .clients = std.ArrayList(*WebSocketContext){},
             .allocator = allocator,
         };
     }
@@ -204,8 +204,8 @@ pub const ChatRoom = struct {
     }
 
     pub fn broadcast(room: *ChatRoom, message: []const u8) void {
-        var failed_clients = std.ArrayList(usize).init(room.allocator);
-        defer failed_clients.deinit();
+        var failed_clients = std.ArrayList(usize){};
+        defer failed_clients.deinit(room.allocator);
 
         for (room.clients.items, 0..) |client, i| {
             client.sendText(message) catch |err| {

@@ -38,7 +38,7 @@ pub const Template = struct {
     /// Render template
     pub fn render(template_obj: Template) ![]const u8 {
         var result = std.ArrayList(u8){};
-        errdefer result.deinit(template_obj.allocator);
+        defer result.deinit(template_obj.allocator);
 
         var i: usize = 0;
         while (i < template_obj.source.len) {

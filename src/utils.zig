@@ -207,8 +207,8 @@ pub fn containsXss(input: []const u8) bool {
 /// defer allocator.free(escaped);
 /// ```
 pub fn allocEscapeHtml(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    var result = std.ArrayList(u8).init(allocator);
-    defer result.deinit();
+    var result = std.ArrayList(u8) {};
+    defer result.deinit(allocator);
 
     for (input) |c| {
         switch (c) {
@@ -221,5 +221,5 @@ pub fn allocEscapeHtml(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
         }
     }
 
-    return result.toOwnedSlice();
+    return result.toOwnedSlice(allocator);
 }

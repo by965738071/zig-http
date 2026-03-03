@@ -88,13 +88,13 @@ pub const LoggingMiddleware = struct {
     }
 
     fn logJson(self: *LoggingMiddleware, ctx: *Context, elapsed_ns: i64) !void {
-        var buffer = std.ArrayList(u8).init(ctx.allocator);
-        defer buffer.deinit();
+        var buffer = std.ArrayList(u8) {};
+        defer buffer.deinit(self.allocator);
 
         const ip = ctx.getHeader("X-Forwarded-For") orelse
             ctx.getHeader("X-Real-IP") orelse "unknown";
 
-        try buffer.writer().print(
+        try buffer.print(
             \\{{
             \\  "timestamp":{d},
             \\  "level":"{s}",
@@ -106,7 +106,7 @@ pub const LoggingMiddleware = struct {
             \\  "ip":"{s}"
         ,
             .{
-                std.Io.now(std.io.getStdIn().io, .monotonic).toMilliseconds(),
+                std.Io.Timestamp.now(ctx.io, .boot).toMilliseconds(),
                 @tagName(self.config.log_level),
                 @tagName(ctx.request.head.method),
                 ctx.request.head.target,
@@ -118,19 +118,19 @@ pub const LoggingMiddleware = struct {
         );
 
         if (self.config.include_headers) {
-            try buffer.appendSlice(",\n  \"headers\":{");
+            try buffer.appendSlice(self.allocator,",\n  \"headers\":{");
             const headers = ctx.getAllHeaders();
             var it = headers.iterator();
             var first = true;
             while (it.next()) |entry| {
-                if (!first) try buffer.appendSlice(",");
+                if (!first) try buffer.appendSlice(self.allocator,",");
                 first = false;
                 try buffer.writer().print("\"{s}\":\"{s}\"", .{ entry.key_ptr.*, entry.value_ptr.* });
             }
-            try buffer.appendSlice("}");
+            try buffer.appendSlice(self.allocator,"}");
         }
 
-        try buffer.appendSlice("\n}\n");
+        try buffer.appendSlice(self.allocator,"\n}\n");
 
         std.log.info("{s}", .{buffer.items});
     }

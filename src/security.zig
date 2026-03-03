@@ -89,13 +89,15 @@ pub const SizeLimiter = struct {
 /// CSRF token manager
 pub const CSRFManager = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     tokens: std.StringHashMap(i64),
     secret: []const u8,
     token_ttl: i64,
 
-    pub fn init(allocator: std.mem.Allocator, secret: []const u8, token_ttl: i64) CSRFManager {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, secret: []const u8, token_ttl: i64) CSRFManager {
         return .{
             .allocator = allocator,
+            .io = io,
             .tokens = std.StringHashMap(i64).init(allocator),
             .secret = secret,
             .token_ttl = token_ttl,
@@ -113,8 +115,8 @@ pub const CSRFManager = struct {
     /// Generate CSRF token
     pub fn generateToken(manager: *CSRFManager, session_id: []const u8) ![]const u8 {
         // Simple token generation using HMAC
-        const io = std.io.getStdIn().io;
-        const now = std.Io.now(io, .monotonic).toMilliseconds();
+
+        const now = std.Io.Timestamp.now(manager.io, .boot).toMilliseconds();
         var hasher = std.crypto.auth.hmac.sha2.HmacSha256.init(manager.secret);
         hasher.update(session_id);
         hasher.update(&std.mem.toBytes(now));
@@ -152,16 +154,16 @@ pub const CSRFManager = struct {
     pub fn cleanup(manager: *CSRFManager) void {
         const io = std.io.getStdIn().io;
         const now = std.Io.now(io, .monotonic).toMilliseconds();
-        var keys = std.ArrayList([]const u8).init(manager.allocator);
+        var keys = std.ArrayList([]const u8){};
         defer {
             for (keys.items) |k| manager.allocator.free(k);
-            keys.deinit();
+            keys.deinit(manager.allocator);
         }
 
         var it = manager.tokens.iterator();
         while (it.next()) |entry| {
             if (now - entry.value_ptr.* > manager.token_ttl) {
-                keys.append(entry.key_ptr.*) catch {};
+                keys.append(manager.allocator,entry.key_ptr.*) catch {};
             }
         }
 

@@ -3,40 +3,42 @@ const Io = std.Io;
 
 /// WebSocket connection pool for broadcasting
 pub const WebSocketPool = struct {
+    io: Io,
     allocator: std.mem.Allocator,
     connections: std.ArrayList(*WebSocketConnection),
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
 
-    pub fn init(allocator: std.mem.Allocator) WebSocketPool {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) WebSocketPool {
         return .{
             .allocator = allocator,
-            .connections = std.ArrayList(*WebSocketConnection).init(allocator),
-            .mutex = .{},
+            .io = io,
+            .connections = std.ArrayList(*WebSocketConnection){},
+            .mutex = std.Io.Mutex.init,
         };
     }
 
     pub fn deinit(pool: *WebSocketPool) void {
-        pool.mutex.lock();
-        defer pool.mutex.unlock();
+        pool.mutex.lock(pool.io);
+        defer pool.mutex.unlock(pool.io);
 
         for (pool.connections.items) |conn| {
             conn.deinit();
             pool.allocator.destroy(conn);
         }
-        pool.connections.deinit();
+        pool.connections.deinit(pool.allocator);
     }
 
     /// Add connection
     pub fn add(pool: *WebSocketPool, conn: *WebSocketConnection) !void {
-        pool.mutex.lock();
-        defer pool.mutex.unlock();
-        try pool.connections.append(conn);
+        pool.mutex.lock(pool.io);
+        defer pool.mutex.unlock(pool.io);
+        try pool.connections.append(pool.allocator, conn);
     }
 
     /// Remove connection
     pub fn remove(pool: *WebSocketPool, conn: *WebSocketConnection) void {
-        pool.mutex.lock();
-        defer pool.mutex.unlock();
+        pool.mutex.lock(pool.io);
+        defer pool.mutex.unlock(pool.io);
 
         for (pool.connections.items, 0..) |item, i| {
             if (item == conn) {
@@ -48,8 +50,8 @@ pub const WebSocketPool = struct {
 
     /// Broadcast message to all connections
     pub fn broadcast(pool: *WebSocketPool, message: []const u8) void {
-        pool.mutex.lock();
-        defer pool.mutex.unlock();
+        pool.mutex.lock(pool.io);
+        defer pool.mutex.unlock(pool.io);
 
         for (pool.connections.items) |conn| {
             conn.send(message) catch {};
@@ -58,8 +60,8 @@ pub const WebSocketPool = struct {
 
     /// Get connection count
     pub fn count(pool: *WebSocketPool) usize {
-        pool.mutex.lock();
-        defer pool.mutex.unlock();
+        pool.mutex.lock(pool.io);
+        defer pool.mutex.unlock(pool.io);
         return pool.connections.items.len;
     }
 };
@@ -83,7 +85,7 @@ pub const WebSocketConnection = struct {
             .allocator = allocator,
             .stream = stream,
             .io = io,
-            .write_buffer = std.ArrayList(u8).init(allocator, {}),
+            .write_buffer = std.ArrayList(u8){},
             .read_buffer = read_buffer,
             .closed = std.atomic.Value(bool).init(false),
             .last_ping = std.atomic.Value(i64).init(std.Io.now(io, .monotonic).toMilliseconds()),
@@ -96,7 +98,7 @@ pub const WebSocketConnection = struct {
 
     pub fn deinit(conn: *WebSocketConnection) void {
         conn.closed.store(true, .monotonic);
-        conn.write_buffer.deinit();
+        conn.write_buffer.deinit(conn.allocator);
         if (conn.subprotocol) |sp| {
             conn.allocator.free(sp);
         }
@@ -124,7 +126,7 @@ pub const WebSocketConnection = struct {
 
         conn.write_buffer.clearRetainingCapacity();
         try conn.write_frame(&.{}, .ping);
-        conn.last_ping.store(std.Io.now(conn.io, .monotonic).toMilliseconds(), .monotonic);
+        conn.last_ping.store(std.Io.Timestamp.now(conn.io, .boot).toMilliseconds(), .monotonic);
     }
 
     /// Send pong
@@ -182,7 +184,7 @@ pub const WebSocketConnection = struct {
         }
 
         // Send frame
-        const w = conn.stream.writer(conn.io, &.{});
+        const w = conn.stream.writer(conn.io, &.{}).interface;
         try w.writeAll(conn.write_buffer.items);
         try w.flush();
 
@@ -239,7 +241,7 @@ pub const WebSocketConnection = struct {
         try conn.write_buffer.appendSlice(conn.allocator, data);
 
         // Write to stream
-        const w = conn.stream.writer(conn.io, &.{});
+        const w = conn.stream.writer(conn.io, &.{}).interface;
         try w.writeAll(conn.write_buffer.items);
         try w.flush();
     }
@@ -256,46 +258,48 @@ pub const WebSocketConnection = struct {
 /// Message queue for WebSocket
 pub const MessageQueue = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     messages: std.ArrayList([]const u8),
-    mutex: std.Thread.Mutex,
-    condition: std.Thread.Condition,
+    mutex: std.Io.Mutex,
+    condition: std.Io.Condition,
 
-    pub fn init(allocator: std.mem.Allocator) MessageQueue {
+    pub fn init(allocator: std.mem.Allocator,io:std.Io) MessageQueue {
         return .{
+            .io = io,
             .allocator = allocator,
-            .messages = std.ArrayList([]const u8).init(allocator),
+            .messages = std.ArrayList([]const u8){},
             .mutex = .{},
             .condition = .{},
         };
     }
 
     pub fn deinit(queue: *MessageQueue) void {
-        queue.mutex.lock();
-        defer queue.mutex.unlock();
+        queue.mutex.lock(queue.io);
+        defer queue.mutex.unlock(queue.io);
 
         for (queue.messages.items) |msg| {
             queue.allocator.free(msg);
         }
-        queue.messages.deinit();
+        queue.messages.deinit(queue.allocator);
     }
 
     /// Push message
     pub fn push(queue: *MessageQueue, message: []const u8) !void {
-        queue.mutex.lock();
-        defer queue.mutex.unlock();
+        queue.mutex.lock(queue.io);
+        defer queue.mutex.unlock(queue.io);
 
         const msg_copy = try queue.allocator.dupe(u8, message);
-        try queue.messages.append(msg_copy);
-        queue.condition.signal();
+        try queue.messages.append(queue.allocator,msg_copy);
+        queue.condition.signal(queue.io);
     }
 
     /// Pop message (blocking)
     pub fn pop(queue: *MessageQueue) ?[]const u8 {
-        queue.mutex.lock();
-        defer queue.mutex.unlock();
+        queue.mutex.lock(queue.io);
+        defer queue.mutex.unlock(queue.io);
 
         while (queue.messages.items.len == 0) {
-            queue.condition.wait(&queue.mutex);
+            queue.condition.wait(queue.io,&queue.mutex);
         }
 
         const msg = queue.messages.orderedRemove(0);
@@ -304,8 +308,8 @@ pub const MessageQueue = struct {
 
     /// Try pop without blocking
     pub fn tryPop(queue: *MessageQueue) ?[]const u8 {
-        queue.mutex.lock();
-        defer queue.mutex.unlock();
+        queue.mutex.lock(queue.io);
+        defer queue.mutex.unlock(queue.io);
 
         if (queue.messages.items.len == 0) return null;
 

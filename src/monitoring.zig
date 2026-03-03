@@ -176,7 +176,7 @@ pub const HealthCheck = struct {
         return .{
             .io = io,
             .allocator = allocator,
-            .checks = std.ArrayList(*Check).init(allocator),
+            .checks = std.ArrayList(*Check){},
         };
     }
 
@@ -222,7 +222,7 @@ pub const HealthCheck = struct {
 
         return .{
             .overall_status = overall_status,
-            .checks = results.toOwnedSlice(),
+            .checks = results.toOwnedSlice(hc.allocator),
             .duration_ms = duration,
         };
     }

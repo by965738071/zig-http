@@ -21,12 +21,16 @@ pub const TraceContext = struct {
 /// Distributed tracing middleware (OpenTelemetry compatible)
 pub const TracingMiddleware = struct {
     config: TracingConfig,
+    allocator: std.mem.Allocator,
 
-    pub fn init(config: TracingConfig) TracingMiddleware {
-        return .{ .config = config };
+    pub fn init(allocator: std.mem.Allocator, config: TracingConfig) TracingMiddleware {
+        return .{ .config = config, .allocator = allocator };
     }
 
-    pub fn process(self: *TracingMiddleware, ctx: *Context, io: std.Io) !Middleware.NextAction {
+    pub fn process(
+        self: *TracingMiddleware,
+        ctx: *Context,
+    ) !Middleware.NextAction {
         // Generate or extract trace ID
         const trace_id = self.getOrCreateTraceId(ctx);
         const span_id = self.generateSpanId(ctx.allocator);
@@ -43,7 +47,7 @@ pub const TracingMiddleware = struct {
             .trace_id = trace_id,
             .span_id = span_id,
             .parent_span_id = parent_span_id,
-            .started_at_ns = std.time.nanoTimestamp(),
+            .started_at_ns = std.Io.Timestamp.now(ctx.io, .boot).nanoseconds,
         };
 
         // Store trace context for use in handlers
@@ -78,17 +82,19 @@ pub const TracingMiddleware = struct {
         return parent_span_id;
     }
 
-    fn generateSpanId(self: *TracingMiddleware, allocator: std.mem.Allocator) ![]const u8 {
+    fn generateSpanId(
+        self: *TracingMiddleware,
+    ) ![]const u8 {
         const utils = @import("../utils.zig");
-        return utils.generateShortId(allocator);
+        return utils.generateShortId(self.allocator);
     }
 
-    fn serializeTraceContext(self: *TracingMiddleware, allocator: std.mem.Allocator, trace: *const TraceContext) ![]const u8 {
-        var buffer = std.ArrayList(u8).init(allocator);
-        try buffer.writer().print(
+    fn serializeTraceContext(self: *TracingMiddleware, trace: *const TraceContext) ![]const u8 {
+        var buffer = std.ArrayList(u8){};
+        try buffer.print(
             "trace_id={s},span_id={s},started_at={d}",
             .{ trace.trace_id, trace.span_id, trace.started_at_ns },
         );
-        return buffer.toOwnedSlice();
+        return buffer.toOwnedSlice(self.allocator);
     }
 };

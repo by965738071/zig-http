@@ -333,10 +333,11 @@ pub const PoolStats = struct {
 pub const HttpConnectionPool = struct {
     pool: ConnectionPool,
     allocator: std.mem.Allocator,
+    io: std.Io,
 
-    pub fn init(allocator: std.mem.Allocator, config: PoolConfig) !HttpConnectionPool {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, config: PoolConfig) !HttpConnectionPool {
         return .{
-            .pool = try ConnectionPool.init(allocator, config),
+            .pool = try ConnectionPool.init(allocator, io, config),
             .allocator = allocator,
         };
     }
@@ -359,34 +360,34 @@ pub const HttpConnectionPool = struct {
         defer self.pool.release(conn);
 
         // Build HTTP request buffer
-        var request_buf = std.ArrayList(u8).init(self.allocator);
-        defer request_buf.deinit();
+        var request_buf = std.ArrayList(u8){};
+        defer request_buf.deinit(self.allocator);
 
-        try request_buf.writer().print("{s} {s} HTTP/1.1\r\n", .{ method, path });
-        try request_buf.writer().print("Host: {s}\r\n", .{host});
-        try request_buf.writer().print("Connection: keep-alive\r\n", .{});
+        try request_buf.print("{s} {s} HTTP/1.1\r\n", .{ method, path });
+        try request_buf.print("Host: {s}\r\n", .{host});
+        try request_buf.print("Connection: keep-alive\r\n", .{});
 
         if (body) |b| {
-            try request_buf.writer().print("Content-Length: {d}\r\n", .{b.len});
+            try request_buf.print("Content-Length: {d}\r\n", .{b.len});
         }
 
         for (headers) |header| {
-            try request_buf.appendSlice(header);
-            try request_buf.appendSlice("\r\n");
+            try request_buf.appendSlice(self.allocator, header);
+            try request_buf.appendSlice(self.allocator, "\r\n");
         }
 
-        try request_buf.appendSlice("\r\n");
+        try request_buf.appendSlice(self.allocator, "\r\n");
 
         if (body) |b| {
-            try request_buf.appendSlice(b);
+            try request_buf.appendSlice(self.allocator, b);
         }
 
         // Send request
-        try conn.stream.writer().writeAll(request_buf.items);
+        try conn.stream.writer(self.io, &.{}).interface.writeAll(request_buf.items);
 
         // Read response
         var response_buf: [8192]u8 = undefined;
-        const n = try conn.stream.reader().readAll(&response_buf);
+        const n = try conn.stream.reader(self.io, &.{}).interface.readSliceShort(&response_buf);
 
         return HttpResponse{
             .data = try self.allocator.dupe(u8, response_buf[0..n]),

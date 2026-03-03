@@ -17,7 +17,7 @@ pub const WebSocketContextEnhanced = struct {
     // Heartbeat configuration
     ping_interval_ns: u64 = 30 * 1_000_000_000, // 30 seconds
     pong_timeout_ns: u64 = 5 * 1_000_000_000, // 5 seconds
-    last_pong_time_ns: i64 = 0,
+    last_pong_time_ns: i96 = 0,
     ping_timer: ?std.time.Timer = null,
 
     // Subprotocol
@@ -34,7 +34,7 @@ pub const WebSocketContextEnhanced = struct {
             .stream = stream,
             .ws = ws,
             .read_buffer = read_buffer,
-            .last_pong_time_ns = std.time.nanoTimestamp(),
+            .last_pong_time_ns = std.Io.Timestamp.now(Io, .boot).nanoseconds,
         };
     }
 
@@ -73,11 +73,13 @@ pub const WebSocketContextEnhanced = struct {
         ctx.connected = false;
 
         // Format close frame: 2 bytes code + UTF-8 reason
-        var close_data = std.ArrayList(u8).init(ctx.allocator);
-        defer close_data.deinit();
+        var close_data = std.ArrayList(u8){};
+        defer close_data.deinit(ctx.allocator);
 
-        close_data.writer().writeIntBig(u16, code) catch {};
-        close_data.appendSlice(reason) catch {};
+        // Write code as big-endian u16 (2 bytes)
+        const code_bytes = [_]u8{ @intCast(code >> 8), @intCast(code & 0xFF) };
+        close_data.appendSlice(ctx.allocator, &code_bytes) catch {};
+        close_data.appendSlice(ctx.allocator, reason) catch {};
 
         _ = ctx.ws.writeMessage(close_data.items, .connection_close) catch {};
         std.log.info("WebSocket closed: code={d}, reason={s}", .{ code, reason });
@@ -166,17 +168,17 @@ pub const SubprotocolNegotiator = struct {
 
     /// Parse Sec-WebSocket-Protocol header
     pub fn parseProtocolHeader(header: []const u8, allocator: std.mem.Allocator) ![][]const u8 {
-        var protocols = std.ArrayList([]const u8).init(allocator);
+        var protocols = std.ArrayList([]const u8){};
 
         var it = std.mem.splitScalar(u8, header, ',');
         while (it.next()) |proto| {
             const trimmed = std.mem.trim(u8, proto, &std.ascii.whitespace);
             if (trimmed.len > 0) {
-                try protocols.append(try allocator.dupe(u8, trimmed));
+                try protocols.append(allocator,try allocator.dupe(u8, trimmed));
             }
         }
 
-        return protocols.toOwnedSlice();
+        return protocols.toOwnedSlice(allocator);
     }
 };
 

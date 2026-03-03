@@ -86,13 +86,13 @@ pub const HTTPClient = struct {
         };
 
         // Build request headers
-        var headers = std.ArrayList(http.Header).init(self.allocator);
+        var headers = std.ArrayList(http.Header){};
         defer {
             for (headers.items) |h| {
                 self.allocator.free(h.name);
                 self.allocator.free(h.value);
             }
-            headers.deinit();
+            headers.deinit(self.allocator);
         }
 
         // Add default headers
@@ -146,7 +146,7 @@ pub const HTTPClient = struct {
             .allocator = self.allocator,
             .status = result.status,
             .headers = try self.cloneHeaders(result.headers),
-            .body = try response_body.toOwnedSlice(),
+            .body = try response_body.toOwnedSlice(self.allocator),
         };
     }
 
