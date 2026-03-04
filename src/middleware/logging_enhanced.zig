@@ -70,7 +70,7 @@ pub const LoggingMiddleware = struct {
             .err => std.log.err,
         };
 
-        log_fn("{s} {s} - {d}μs - {d} - {s}", .{
+        log_fn("{s} {s} - {d}us - {d} - {s}", .{
             @tagName(ctx.request.head.method),
             ctx.request.head.target,
             elapsed_us,

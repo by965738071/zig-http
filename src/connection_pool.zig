@@ -96,7 +96,7 @@ pub const ConnectionPool = struct {
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, config: PoolConfig) !Self {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, config: PoolConfig) Self {
         return .{
             .config = config,
             .allocator = allocator,
@@ -221,10 +221,10 @@ pub const ConnectionPool = struct {
         // Connect with timeout (using none for no timeout)
         const stream = try address.connect(self.io, .{ .mode = .stream, .protocol = .tcp, .timeout = .none });
 
-        // Configure socket options
-        // try stream.handle.setNoDelay(true); // Disable Nagle's algorithm
-        // try stream.handle.setKeepAlive(true);
-
+        // Note: In Zig 0.16, socket options like setNoDelay and setKeepAlive
+        // are no longer directly available on Stream. These would need to be set
+        // through OS-specific socket APIs if needed.
+        std.posix.TCP.NODELAY;
         return stream;
     }
 
@@ -335,10 +335,11 @@ pub const HttpConnectionPool = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, config: PoolConfig) !HttpConnectionPool {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, config: PoolConfig) HttpConnectionPool {
         return .{
-            .pool = try ConnectionPool.init(allocator, io, config),
+            .pool = ConnectionPool.init(allocator, io, config),
             .allocator = allocator,
+            .io = io,
         };
     }
 

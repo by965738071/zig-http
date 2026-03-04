@@ -1,5 +1,5 @@
 const std = @import("std");
-const Context = @import("context.zig").Context;
+const Context = @import("core/context.zig").Context;
 
 /// Interceptor trait
 pub const Interceptor = struct {
@@ -56,9 +56,9 @@ pub const InterceptorRegistry = struct {
     pub fn init(allocator: std.mem.Allocator) InterceptorRegistry {
         return .{
             .allocator = allocator,
-            .before_request = std.ArrayList(*Interceptor).empty,
-            .after_response = std.ArrayList(*Interceptor).empty,
-            .on_error = std.ArrayList(*Interceptor).empty,
+            .before_request = std.ArrayList(*Interceptor){},
+            .after_response = std.ArrayList(*Interceptor){},
+            .on_error = std.ArrayList(*Interceptor){},
         };
     }
 
@@ -88,7 +88,7 @@ pub const InterceptorRegistry = struct {
         var interceptor_ctx = InterceptorContext.init(self.allocator, .before_request, ctx);
         for (self.before_request.items) |interceptor| {
             interceptor.process(&interceptor_ctx) catch |err| {
-                std.log.warn("Interceptor '{s}' failed: {}", .{interceptor.name, err});
+                std.log.err("Interceptor '{s}' failed: {}", .{ interceptor.name, err });
                 return err;
             };
         }
@@ -99,7 +99,7 @@ pub const InterceptorRegistry = struct {
         var interceptor_ctx = InterceptorContext.init(self.allocator, .after_response, ctx);
         for (self.after_response.items) |interceptor| {
             interceptor.process(&interceptor_ctx) catch |err| {
-                std.log.warn("Interceptor '{s}' failed: {}", .{interceptor.name, err});
+                std.log.err("Interceptor '{s}' failed: {}", .{ interceptor.name, err });
                 // Don't fail the response if interceptor fails
             };
         }
@@ -111,14 +111,13 @@ pub const InterceptorRegistry = struct {
         interceptor_ctx.setError(err);
         for (self.on_error.items) |interceptor| {
             interceptor.process(&interceptor_ctx) catch |e| {
-                std.log.warn("Error interceptor '{s}' failed: {}", .{interceptor.name, e});
+                std.log.err("Error interceptor '{s}' failed: {}", .{ interceptor.name, e });
             };
         }
     }
 };
 
 /// Built-in interceptors
-
 /// Logging interceptor - logs request/response details
 pub fn loggingInterceptor(ctx: *InterceptorContext) !void {
     const request_id = ctx.context.getRequestId() orelse "unknown";
@@ -154,7 +153,7 @@ pub fn timingInterceptor(ctx: *InterceptorContext) !void {
         },
         .after_response => {
             const current = request_counter.load(.monotonic);
-            std.log.info("[{s}] Request completed (total: {d})", .{request_id, current});
+            std.log.info("[{s}] Request completed (total: {d})", .{ request_id, current });
         },
         .on_error => {
             std.log.warn("[{s}] Request failed", .{request_id});
@@ -167,12 +166,12 @@ pub fn sizeInterceptor(ctx: *InterceptorContext) !void {
     switch (ctx.phase) {
         .before_request => {
             if (ctx.context.request.head.content_length) |len| {
-                std.log.debug("Request body size: {d} bytes", .{len});
+                std.log.info("Request body size: {d} bytes", .{len});
             }
         },
         .after_response => {
             const size = ctx.context.response.body.items.len;
-            std.log.debug("Response body size: {d} bytes", .{size});
+            std.log.info("Response body size: {d} bytes", .{size});
         },
         .on_error => {},
     }

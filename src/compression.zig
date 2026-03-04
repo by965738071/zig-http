@@ -123,8 +123,8 @@ pub const CompressionMiddleware = struct {
     config: CompressionConfig,
     allocator: std.mem.Allocator,
 
-    const Context = @import("context.zig").Context;
-    const Middleware = @import("middleware.zig").Middleware;
+    const Context = @import("core/context.zig").Context;
+    const Middleware = @import("core/middleware.zig").Middleware;
 
     pub fn init(allocator: std.mem.Allocator, config: CompressionConfig) !*CompressionMiddleware {
         const mw = try allocator.create(CompressionMiddleware);

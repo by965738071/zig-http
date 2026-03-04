@@ -21,8 +21,8 @@ pub const MemoryPool = struct {
     pub fn init(allocator: std.mem.Allocator, io: std.Io.Threaded, config: PoolConfig) MemoryPool {
         return .{
             .io = io,
-            .blocks = std.ArrayList([]u8).empty,
-            .free_list = std.ArrayList(usize).empty,
+            .blocks = std.ArrayList([]u8){},
+            .free_list = std.ArrayList(usize){},
             .config = config,
             .allocator = allocator,
             .used_blocks = 0,

@@ -156,4 +156,34 @@ pub const Router = struct {
         params.deinit();
         return null;
     }
+
+    /// Check if a path exists in the router (ignoring method)
+    pub fn hasPath(router: *Router, path: []const u8) bool {
+        // Remove query string from path
+        const path_no_query = std.mem.indexOfScalar(u8, path, '?') orelse path.len;
+        const clean_path = path[0..path_no_query];
+
+        var trimmed_path = std.mem.trim(u8, clean_path, "/");
+        if (trimmed_path.len == 0) {
+            return router.root.handler != null;
+        }
+
+        var segments = std.mem.splitScalar(u8, trimmed_path, '/');
+        var current = router.root;
+
+        while (segments.next()) |segment| {
+            if (current.children.get(segment)) |child| {
+                current = child;
+            } else if (current.param_child) |_| {
+                current = current.param_child.?;
+            } else if (current.wildcard_child) |_| {
+                current = current.wildcard_child.?;
+                break;
+            } else {
+                return false;
+            }
+        }
+
+        return current.handler != null;
+    }
 };

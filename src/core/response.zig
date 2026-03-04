@@ -1,6 +1,6 @@
 const std = @import("std");
 const http = std.http;
-const StringInterner = @import("zero_copy.zig").StringInterner;
+const StringInterner = @import("../zero_copy.zig").StringInterner;
 
 pub const Response = struct {
     allocator: std.mem.Allocator,
@@ -88,28 +88,26 @@ pub const Response = struct {
         return res.getHeader(name) != null;
     }
 
-    pub fn toHttpResponse(res: *Response, writer: anytype, request: *http.Server.Request) !void {
-        const w = &writer.interface;
-
+    pub fn toHttpResponse(res: *Response, writer: *std.Io.Writer, request: *http.Server.Request) !void {
         const status_code = @intFromEnum(res.status);
         const phrase = res.status.phrase() orelse "Unknown";
-        try w.print("HTTP/1.1 {d} {s}\r\n", .{ status_code, phrase });
+        try writer.print("HTTP/1.1 {d} {s}\r\n", .{ status_code, phrase });
 
-        try w.print("Content-Length: {d}\r\n", .{res.body.items.len});
-        try w.print("Connection: {s}\r\n", .{if (request.head.keep_alive) "keep-alive" else "close"});
-        try w.writeAll("Server: Zig-HTTP/0.16\r\n");
+        try writer.print("Content-Length: {d}\r\n", .{res.body.items.len});
+        try writer.print("Connection: {s}\r\n", .{if (request.head.keep_alive) "keep-alive" else "close"});
+        try writer.writeAll("Server: Zig-HTTP/0.16\r\n");
 
         var it = res.headers.iterator();
         while (it.next()) |entry| {
-            try w.print("{s}: {s}\r\n", .{ entry.key_ptr.*, entry.value_ptr.* });
+            try writer.print("{s}: {s}\r\n", .{ entry.key_ptr.*, entry.value_ptr.* });
         }
 
-        try w.writeAll("\r\n");
+        try writer.writeAll("\r\n");
 
         if (res.body.items.len > 0) {
-            try w.writeAll(res.body.items);
+            try writer.writeAll(res.body.items);
         }
 
-        try w.flush();
+        try writer.flush();
     }
 };

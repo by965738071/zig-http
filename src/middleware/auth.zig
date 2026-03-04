@@ -1,7 +1,7 @@
 const std = @import("std");
 const http = std.http;
-const Middleware = @import("../middleware.zig").Middleware;
-const Context = @import("../context.zig").Context;
+const Middleware = @import("../core/middleware.zig").Middleware;
+const Context = @import("../core/context.zig").Context;
 
 pub const AuthMiddleware = struct {
     middleware: Middleware,

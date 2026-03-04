@@ -1,4 +1,6 @@
 const std = @import("std");
+// Context is defined in context.zig to avoid circular dependency
+const Context = @import("context.zig").Context;
 
 pub const Handler = *const fn (ctx: *Context) anyerror!void;
 
@@ -38,6 +40,3 @@ pub const ParamList = struct {
         try list.data.put(name, value);
     }
 };
-
-// Context is defined in context.zig to avoid circular dependency
-const Context = @import("context.zig").Context;

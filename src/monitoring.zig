@@ -85,7 +85,7 @@ pub const Metrics = struct {
     /// defer metrics.allocator.free(json);
     /// ```
     pub fn allocToJson(metrics: *Metrics) ![]const u8 {
-        var result = std.ArrayList(u8).empty;
+        var result = std.ArrayList(u8){};
         errdefer result.deinit(metrics.allocator);
 
         try result.appendSlice(metrics.allocator, "{\n");

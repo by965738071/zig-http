@@ -1,6 +1,6 @@
 const std = @import("std");
-const Middleware = @import("../middleware.zig").Middleware;
-const Context = @import("../context.zig").Context;
+const Middleware = @import("../core/middleware.zig").Middleware;
+const Context = @import("../core/context.zig").Context;
 
 pub const LoggingMiddleware = struct {
     middleware: Middleware,
@@ -19,7 +19,7 @@ pub const LoggingMiddleware = struct {
         defer {
             const duration = start.untilNow(io, .boot);
 
-            std.log.info("{s} {s} - {d}μs", .{
+            std.log.info("{s} {s} - {d}us", .{
                 @tagName(ctx.request.head.method),
                 ctx.request.head.target,
                 duration.toNanoseconds(),

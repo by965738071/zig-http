@@ -1,5 +1,5 @@
 const std = @import("std");
-const Context = @import("context.zig").Context;
+const Context = @import("core/context.zig").Context;
 
 /// Structured logging configuration
 pub const LogConfig = struct {

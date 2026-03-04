@@ -44,7 +44,7 @@ pub const StreamingWriter = struct {
     pub fn writeSSE(self: *StreamingWriter, data: []const u8) !void {
         if (self.closed) return error.StreamClosed;
 
-        const w = &self.writer.interface;
+        const w = &self.writer;
 
         // Write event name if configured
         if (self.config.event_name) |event| {
@@ -69,7 +69,7 @@ pub const StreamingWriter = struct {
     pub fn writeChunk(self: *StreamingWriter, data: []const u8) !void {
         if (self.closed) return error.StreamClosed;
 
-        const w = &self.writer.interface;
+        const w = &self.writer;
 
         // Write chunk size in hex
         try w.print("{x}\r\n", .{data.len});
@@ -83,7 +83,7 @@ pub const StreamingWriter = struct {
         if (self.closed) return;
         self.closed = true;
 
-        const w = &self.writer.interface;
+        const w = &self.writer;
 
         switch (self.config.stream_type) {
             .chunked => {
@@ -110,8 +110,8 @@ pub const StreamingWriter = struct {
 pub const StreamingMiddleware = struct {
     allocator: std.mem.Allocator,
 
-    const Context = @import("context.zig").Context;
-    const Middleware = @import("middleware.zig").Middleware;
+    const Context = @import("core/context.zig").Context;
+    const Middleware = @import("core/middleware.zig").Middleware;
 
     pub fn init(allocator: std.mem.Allocator) StreamingMiddleware {
         return .{

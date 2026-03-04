@@ -8,15 +8,15 @@ const Context = @import("context.zig").Context;
 const Response = @import("response.zig").Response;
 const Config = @import("types.zig").Config;
 const Handler = @import("types.zig").Handler;
-const StaticServer = @import("static_server.zig").StaticServer;
-const RateLimiter = @import("rate_limiter.zig").RateLimiter;
-const Metrics = @import("monitoring.zig").Metrics;
-const ErrorHandler = @import("error_handler.zig").ErrorHandler;
-const Logger = @import("error_handler.zig").Logger;
-const WebSocketServer = @import("websocket.zig").WebSocketServer;
-const StringInterner = @import("zero_copy.zig").StringInterner;
-const InterceptorRegistry = @import("interceptor.zig").InterceptorRegistry;
-
+const StaticServer = @import("../static_server.zig").StaticServer;
+const RateLimiter = @import("../rate_limiter.zig").RateLimiter;
+const Metrics = @import("../monitoring.zig").Metrics;
+const ErrorHandler = @import("../error_handler.zig").ErrorHandler;
+const Logger = @import("../error_handler.zig").Logger;
+const WebSocketServer = @import("../websocket.zig").WebSocketServer;
+const StringInterner = @import("../zero_copy.zig").StringInterner;
+const InterceptorRegistry = @import("../interceptor.zig").InterceptorRegistry;
+const WebSocketContext = @import("../websocket.zig").WebSocketContext;
 
 // Helper: read exactly `buf.len` bytes from a reader (returns number read or error)
 // Use Reader vtable's readVec when available (0.16 reader API).
@@ -348,75 +348,93 @@ fn handleConnection(server: *HTTPServer, stream: Io.net.Stream) void {
         const timeout_ns: i96 = @intCast(server.config.connection_timeout * 1_000_000); // Convert ms to ns
         if (elapsed_ns > timeout_ns) {
             const elapsed_ms = @divTrunc(elapsed_ns, 1_000_000);
-            std.log.debug("Connection timeout after {d}ms", .{elapsed_ms});
+            std.log.err("Connection timeout after {d}ms", .{elapsed_ms});
             break;
         }
         var request = http_server_struct.receiveHead() catch |err| {
-            // Normal connection close conditions
-            if (err == error.EndOfStream or err == error.HttpConnectionClosing) break;
-            if (err == error.ReadFailed) {
-                // 客户端可能已经优雅关闭或出现连接异常 —— 以 debug 级别记录并退出连接处理循环
-                std.log.debug("Connection read failed while waiting for request (client likely closed connection): {} (active_connections={d})", .{ err, server.getActiveConnections() });
-                break;
-            }
-            std.log.debug("Request head read error: {}", .{err});
+            std.log.info("Rquest head read error {s}", .{@errorName(err)});
             break;
         };
 
         std.debug.print("Received: {s} {s} (keep-alive: {})\n", .{ @tagName(request.head.method), request.head.target, request.head.keep_alive });
 
         // Check for WebSocket upgrade before handling regular request
-        if (server.ws_server) |ws_server| {
-            const upgrade = request.upgradeRequested();
-            const upgrade_str = switch (upgrade) {
-                .none => "none",
-                .websocket => "websocket",
-                else => "unknown",
-            };
-            std.log.info("WebSocket upgrade check for {s}: {s}", .{ request.head.target, upgrade_str });
+        // Early exit: only check WebSocket upgrade if necessary headers are present
+        if (server.ws_server != null) {
+            // Fast path: check if it might be a WebSocket upgrade request
+            // A WebSocket upgrade requires: Connection: Upgrade and Upgrade: websocket
+            var connection_header: ?[]const u8 = null;
+            var upgrade_header: ?[]const u8 = null;
 
-            if (upgrade == .websocket) {
-                const sec_websocket_key = upgrade.websocket orelse {
-                    std.log.err("WebSocket upgrade missing Sec-WebSocket-Key header", .{});
-                    break;
+            var it = request.iterateHeaders();
+            while (it.next()) |header| {
+                if (std.ascii.eqlIgnoreCase(header.name, "Connection")) {
+                    connection_header = header.value;
+                } else if (std.ascii.eqlIgnoreCase(header.name, "Upgrade")) {
+                    upgrade_header = header.value;
+                }
+            }
+
+            const is_potential_websocket = if (connection_header) |conn|
+                std.mem.indexOf(u8, conn, "upgrade") != null
+            else
+                false and
+                    if (upgrade_header) |upg|
+                        std.ascii.eqlIgnoreCase(upg, "websocket")
+                    else
+                        false;
+
+            if (is_potential_websocket) {
+                const ws_server = server.ws_server.?;
+                const upgrade = request.upgradeRequested();
+                const upgrade_str = switch (upgrade) {
+                    .none => "none",
+                    .websocket => "websocket",
+                    else => "unknown",
                 };
+                std.log.info("WebSocket upgrade check for {s}: {s}", .{ request.head.target, upgrade_str });
 
-                if (ws_server.hasHandler(request.head.target)) {
-                    std.log.info("WebSocket handler found for: {s}", .{request.head.target});
-                    const handler = ws_server.getHandler(request.head.target).?;
-
-                    std.log.info("Responding to WebSocket upgrade with key: {s}", .{sec_websocket_key});
-                    const ws = request.respondWebSocket(.{ .key = sec_websocket_key }) catch |err| {
-                        std.log.err("WebSocket upgrade failed: {}", .{err});
+                if (upgrade == .websocket) {
+                    const sec_websocket_key = upgrade.websocket orelse {
+                        std.log.err("WebSocket upgrade missing Sec-WebSocket-Key header", .{});
                         break;
                     };
 
-                    const WebSocketContext = @import("websocket.zig").WebSocketContext;
+                    if (ws_server.hasHandler(request.head.target)) {
+                        std.log.info("WebSocket handler found for: {s}", .{request.head.target});
+                        const handler = ws_server.getHandler(request.head.target).?;
 
-                    const ws_read_buffer = server.allocator.alloc(u8, 8192) catch |err| {
-                        std.log.err("Failed to allocate WebSocket read buffer: {}", .{err});
-                        break;
-                    };
-                    defer server.allocator.free(ws_read_buffer);
+                        std.log.info("Responding to WebSocket upgrade with key: {s}", .{sec_websocket_key});
+                        const ws = request.respondWebSocket(.{ .key = sec_websocket_key }) catch |err| {
+                            std.log.err("WebSocket upgrade failed: {}", .{err});
+                            break;
+                        };
 
-                    var context = WebSocketContext{
-                        .allocator = server.allocator,
-                        .io = io,
-                        .stream = stream,
-                        .ws = ws,
-                        .read_buffer = ws_read_buffer,
-                    };
+                        const ws_read_buffer = server.allocator.alloc(u8, 8192) catch |err| {
+                            std.log.err("Failed to allocate WebSocket read buffer: {}", .{err});
+                            break;
+                        };
+                        defer server.allocator.free(ws_read_buffer);
 
-                    std.log.info("WebSocket connection established, calling handler", .{});
-                    handler(&context) catch |err| {
-                        std.log.err("WebSocket handler error: {}", .{err});
-                        context.close();
-                    };
-                    std.log.info("WebSocket handler completed", .{});
+                        var context = WebSocketContext{
+                            .allocator = server.allocator,
+                            .io = io,
+                            .stream = stream,
+                            .ws = ws,
+                            .read_buffer = ws_read_buffer,
+                        };
 
-                    return;
-                } else {
-                    std.log.warn("No WebSocket handler found for path: {s}", .{request.head.target});
+                        std.log.info("WebSocket connection established, calling handler", .{});
+                        handler(&context) catch |err| {
+                            std.log.err("WebSocket handler error: {}", .{err});
+                            context.close();
+                        };
+                        std.log.info("WebSocket handler completed", .{});
+
+                        return;
+                    } else {
+                        std.log.warn("No WebSocket handler found for path: {s}", .{request.head.target});
+                    }
                 }
             }
         }
@@ -441,11 +459,11 @@ fn handleConnection(server: *HTTPServer, stream: Io.net.Stream) void {
 
             var ctx_tmp = Context.init(server.allocator, server, &request, &response, server.io) catch {
                 // If context init fails, still send response
-                response.toHttpResponse(&writer, &request) catch {};
+                response.toHttpResponse(&writer.interface, &request) catch {};
                 break;
             };
             defer ctx_tmp.deinit();
-            response.toHttpResponse(&writer, &request) catch {};
+            response.toHttpResponse(&writer.interface, &request) catch {};
             break;
         }
 
@@ -517,8 +535,9 @@ fn handleConnection(server: *HTTPServer, stream: Io.net.Stream) void {
         };
         defer response.deinit();
 
-        var context = Context.init(server.allocator, server, &request, &response, server.io) catch {
+        var context = Context.init(server.allocator, server, &request, &response, server.io) catch  |context_error|{
             // If context init fails, we can't continue
+            std.log.err("Context init failed: {}", .{context_error});
             break;
         };
         defer context.deinit();
@@ -527,6 +546,15 @@ fn handleConnection(server: *HTTPServer, stream: Io.net.Stream) void {
             // Transfer ownership of the body into the request context
             // context.deinit() will free the body
             context.body_data = body;
+
+            // Initialize body parser with the content type and body data
+            const content_type = context.getHeader("Content-Type");
+            context.body_parser = @import("../body_parser.zig").BodyParser.init(
+                server.allocator,
+                content_type,
+                body,
+            );
+
             body_owned = false; // Ownership transferred to context
         } else if (!body_owned) {
             // No body or body is not owned (empty slice), nothing to free
@@ -560,7 +588,7 @@ fn handleRequest(server: *HTTPServer, context: *Context, writer: anytype) !bool 
             std.log.err("Before request interceptor failed: {}", .{err});
             context.setStatus(http.Status.internal_server_error);
             try context.json(.{ .error_val = "Internal server error" });
-            try response.toHttpResponse(writer, request);
+            try response.toHttpResponse(&writer.interface, request);
             return true;
         };
     }
@@ -573,7 +601,7 @@ fn handleRequest(server: *HTTPServer, context: *Context, writer: anytype) !bool 
         if (!limiter.isAllowed(key)) {
             context.setStatus(http.Status.too_many_requests);
             try context.json(.{ .error_val = "Rate limit exceeded", .retry_after = 60 });
-            try response.toHttpResponse(writer, request);
+            try response.toHttpResponse(&writer.interface, request);
             return true;
         }
     }
@@ -583,9 +611,18 @@ fn handleRequest(server: *HTTPServer, context: *Context, writer: anytype) !bool 
         std.log.err("Error finding route: {}", .{err});
         context.setStatus(http.Status.internal_server_error);
         try context.json(.{ .error_val = "Internal server error" });
-        try response.toHttpResponse(writer, request);
+        try response.toHttpResponse(&writer.interface, request);
         return true;
     } orelse {
+        // Route not found for this method - check if it exists for other methods (405 vs 404)
+        if (server.router.hasPath(request.head.target)) {
+            // Path exists but method not allowed
+            context.setStatus(http.Status.method_not_allowed);
+            try context.json(.{ .error_val = "Method not allowed" });
+            try response.toHttpResponse(&writer.interface, request);
+            return true;
+        }
+
         // Check if static file server is configured
         if (server.static_server) |static_srv| {
             if (request.head.method == http.Method.GET and
@@ -593,7 +630,7 @@ fn handleRequest(server: *HTTPServer, context: *Context, writer: anytype) !bool 
                     std.log.err("Static file error: {}", .{err});
                     context.setStatus(http.Status.internal_server_error);
                     try context.html("Internal server error");
-                    try response.toHttpResponse(writer, request);
+                    try response.toHttpResponse(&writer.interface, request);
                     return true;
                 })
             {
@@ -603,7 +640,7 @@ fn handleRequest(server: *HTTPServer, context: *Context, writer: anytype) !bool 
 
         context.setStatus(http.Status.not_found);
         try context.json(.{ .error_val = "Not found" });
-        try response.toHttpResponse(writer, request);
+        try response.toHttpResponse(&writer.interface, request);
         return true;
     };
 
@@ -613,7 +650,7 @@ fn handleRequest(server: *HTTPServer, context: *Context, writer: anytype) !bool 
         switch (action) {
             .@"continue" => continue,
             .respond, .err => {
-                try response.toHttpResponse(writer, request);
+                try response.toHttpResponse(&writer.interface, request);
                 return true;
             },
         }
@@ -625,7 +662,7 @@ fn handleRequest(server: *HTTPServer, context: *Context, writer: anytype) !bool 
         switch (action) {
             .@"continue" => continue,
             .respond, .err => {
-                try response.toHttpResponse(writer, request);
+                try response.toHttpResponse(&writer.interface, request);
                 return true;
             },
         }
@@ -650,6 +687,6 @@ fn handleRequest(server: *HTTPServer, context: *Context, writer: anytype) !bool 
         };
     }
 
-    try response.toHttpResponse(writer, request);
+    try response.toHttpResponse(&writer.interface, request);
     return true;
 }

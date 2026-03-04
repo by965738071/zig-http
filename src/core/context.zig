@@ -4,15 +4,15 @@ const http = std.http;
 const Response = @import("response.zig").Response;
 const ParamList = @import("types.zig").ParamList;
 const HTTPServer = @import("http_server.zig").HTTPServer;
-const BodyParser = @import("body_parser.zig").BodyParser;
-const MultipartParser = @import("multipart.zig").MultipartParser;
-const MultipartForm = @import("multipart.zig").MultipartForm;
-const CookieJar = @import("cookie.zig").CookieJar;
-const Cookie = @import("cookie.zig").Cookie;
-const Session = @import("session.zig").Session;
-const SessionManager = @import("session.zig").SessionManager;
-const utils = @import("utils.zig");
-const StringInterner = @import("zero_copy.zig").StringInterner;
+const BodyParser = @import("../body_parser.zig").BodyParser;
+const MultipartForm = @import("../body_parser.zig").MultipartForm;
+const CookieJar = @import("../cookie.zig").CookieJar;
+const Cookie = @import("../cookie.zig").Cookie;
+const Session = @import("../session.zig").Session;
+const SessionManager = @import("../session.zig").SessionManager;
+const utils = @import("../utils.zig");
+const StringInterner = @import("../zero_copy.zig").StringInterner;
+const binder = @import("binder.zig");
 
 pub const Context = struct {
     server: *HTTPServer,
@@ -216,6 +216,14 @@ pub const Context = struct {
         return null;
     }
 
+    /// Get parsed multipart form data from request body
+    pub fn getMultipartFromParser(ctx: *Context) ?*const MultipartForm {
+        if (ctx.body_parser) |parser| {
+            return parser.getMultipart();
+        }
+        return null;
+    }
+
     /// Get raw body data
     pub fn getBody(ctx: *Context) []const u8 {
         if (ctx.body_data) |d| return @as([]const u8, d);
@@ -224,6 +232,12 @@ pub const Context = struct {
 
     /// Get multipart form data
     pub fn getMultipart(ctx: *Context) ?*const MultipartForm {
+        // First check if we have it from body_parser
+        if (ctx.getMultipartFromParser()) |form| {
+            return form;
+        }
+
+        // Fall back to legacy multipart_form field
         if (ctx.multipart_form) |*form| {
             return form;
         }
@@ -234,10 +248,10 @@ pub const Context = struct {
             return null;
         }
 
-        // Parse multipart
         const data = ctx.getBody();
         if (data.len == 0) return null;
 
+        const MultipartParser = @import("../body_parser.zig").MultipartParser;
         const boundary = MultipartParser.extractBoundary(content_type) catch |parse_err| {
             std.log.warn("Failed to extract multipart boundary: {}", .{parse_err});
             return null;
@@ -250,11 +264,9 @@ pub const Context = struct {
             return null;
         };
 
-        // Store parsed form - we need a mutable reference
         const form_ptr = ctx.allocator.create(MultipartForm) catch return null;
         form_ptr.* = form;
 
-        // Transfer ownership into the context so it will be freed with ctx.deinit
         ctx.multipart_form = form_ptr;
 
         return form_ptr;
@@ -361,5 +373,41 @@ pub const Context = struct {
     pub fn err(ctx: *Context, status_code: http.Status, message: []const u8) !void {
         ctx.setStatus(status_code);
         try ctx.json(.{ .error_val = message });
+    }
+
+    // ====================================================================
+    // Parameter binding convenience methods
+    // ====================================================================
+
+    /// Bind request parameters to a struct
+    pub fn bind(ctx: *Context, comptime T: type) binder.BindingResult {
+        return binder.bindRequest(T, ctx);
+    }
+
+    /// Bind JSON body to a struct
+    pub fn bindJSON(ctx: *Context, comptime T: type) !T {
+        return binder.bindJSONBody(T, ctx);
+    }
+
+    /// Bind request and automatically handle errors
+    pub fn bindOrError(ctx: *Context, comptime T: type) !T {
+        var result = binder.bindRequest(T, ctx);
+        defer result.deinit(ctx.allocator);
+
+        if (result.has_errors) {
+            ctx.setStatus(http.Status.bad_request);
+            try ctx.json(.{
+                .status = "error",
+                .message = "Parameter binding failed",
+                .errors = result.errors.items,
+            });
+            return error.BindingFailed;
+        }
+
+        if (binder.getBoundValue(T, &result)) |bound| {
+            return bound.*;
+        }
+
+        return error.BindingFailed;
     }
 };

@@ -5,7 +5,11 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // Main executable
-    const exe = b.addExecutable(.{ .name = "zig_http", .root_module = b.createModule(.{ .root_source_file = b.path("src/main.zig"), .target = target, .optimize = optimize }) });
+    const exe = b.addExecutable(.{ .name = "zig_http", .root_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
 
     b.installArtifact(exe);
 

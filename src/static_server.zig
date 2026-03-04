@@ -3,7 +3,7 @@ const http = std.http;
 const fs = std.fs;
 const mem = std.mem;
 const Io = std.Io;
-const Context = @import("context.zig").Context;
+const Context = @import("core/context.zig").Context;
 /// Static file server configuration
 pub const StaticConfig = struct {
     /// Root directory for static files
