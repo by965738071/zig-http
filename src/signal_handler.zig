@@ -4,9 +4,9 @@ const Io = std.Io;
 
 /// Signal types to handle
 pub const Signal = enum {
-    interrupt,  // SIGINT (Ctrl+C)
-    terminate,  // SIGTERM
-    quit,       // SIGQUIT (Ctrl+\)
+    interrupt, // SIGINT (Ctrl+C)
+    terminate, // SIGTERM
+    quit, // SIGQUIT (Ctrl+\)
 };
 
 /// Signal handler configuration
@@ -55,7 +55,9 @@ pub const SignalHandler = struct {
 
     pub fn deinit(self: *SignalHandler) void {
         if (self.signal_thread) |thread| {
+            std.log.info("Waiting for signal handler thread to finish...", .{});
             thread.join();
+            std.log.info("Signal handler thread finished", .{});
         }
     }
 
@@ -94,18 +96,20 @@ pub const SignalHandler = struct {
     fn setupPosixSignalHandler(self: *SignalHandler) !void {
         const posix = std.posix;
 
-        // Block signals in main thread
+        // Create signal set
         var sigset = posix.sigemptyset();
         if (self.config.handle_interrupt) {
-            try posix.sigaddset(&sigset, posix.SIG.INT);
+            posix.sigaddset(&sigset, posix.SIG.INT);
         }
         if (self.config.handle_terminate) {
-            try posix.sigaddset(&sigset, posix.SIG.TERM);
+            posix.sigaddset(&sigset, posix.SIG.TERM);
         }
         if (self.config.handle_quit) {
-            try posix.sigaddset(&sigset, posix.SIG.QUIT);
+            posix.sigaddset(&sigset, posix.SIG.QUIT);
         }
-        try posix.pthread_sigmask(posix.SIG.BLOCK, &sigset, null);
+
+        // Block signals in all threads by default
+        _ = posix.system.sigprocmask(posix.SIG.BLOCK, &sigset, null);
 
         // Start signal handling thread
         self.signal_thread = try std.Thread.spawn(.{}, signalHandlerThread, .{
@@ -119,11 +123,11 @@ pub const SignalHandler = struct {
     fn signalHandlerThread(handler: *SignalHandler, sigset: std.posix.sigset_t) void {
         while (true) {
             var received_sig: c_int = 0;
-            const rc = std.posix.sigwait(&sigset, &received_sig);
+            const rc = std.posix.system.sigwait(@constCast(&sigset), &received_sig);
 
             if (rc == 0) {
                 switch (received_sig) {
-                    std.posix.SIG.INT, std.posix.SIG.TERM, std.posix.SIG.QUIT => {
+                    @intFromEnum(std.posix.SIG.INT), @intFromEnum(std.posix.SIG.TERM), @intFromEnum(std.posix.SIG.QUIT) => {
                         handler.requestShutdown();
                         break;
                     },

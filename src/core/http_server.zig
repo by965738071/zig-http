@@ -56,7 +56,7 @@ fn readChunkedBody(allocator: std.mem.Allocator, reader: *std.Io.Reader) ![]u8 {
             if (n == 0) {
                 return error.EndOfStream;
             }
-            try line_buf.append(allocator,byte[0]);
+            try line_buf.append(allocator, byte[0]);
             const len = line_buf.items.len;
             if (len >= 2 and line_buf.items[len - 2] == '\r' and line_buf.items[len - 1] == '\n') {
                 line_ended = true;
@@ -276,7 +276,7 @@ pub const HTTPServer = struct {
         const address = try std.Io.net.IpAddress.parseLiteral(host_str);
 
         server.tcp_server = try address.listen(server.io, .{
-            .reuse_address = true,
+            .reuse_address = false,
             .kernel_backlog = 4096,
         });
 
