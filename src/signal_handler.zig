@@ -95,7 +95,7 @@ pub const SignalHandler = struct {
         const posix = std.posix;
 
         // Block signals in main thread
-        var sigset = posix.empty_sigset;
+        var sigset = posix.sigemptyset();
         if (self.config.handle_interrupt) {
             try posix.sigaddset(&sigset, posix.SIG.INT);
         }
