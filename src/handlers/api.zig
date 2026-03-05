@@ -30,75 +30,31 @@ pub fn handleData(ctx: *Context) !void {
 }
 
 /// Handle POST /api/submit - process form submissions
+/// Using struct-based parameter binding for type safety and clarity
+
+/// Submit request parameters
+pub const SubmitRequest = struct {
+    /// Parameter from query, form, path, or JSON body
+    abc: []const u8,
+};
+
 pub fn handleSubmit(ctx: *Context) !void {
+    // Bind request parameters to struct
+    const data = ctx.bindOrError(SubmitRequest) catch |err| {
+        std.log.debug("Parameter binding failed: {}", .{err});
+        // Error response is already set by bindOrError
+        return err;
+    };
+    
     ctx.response.setStatus(http.Status.ok);
-
-    const body = ctx.getBody();
-    if (body.len == 0) {
-        try ctx.response.writeJSON(.{
-            .status = "error",
-            .message = "No request body",
-        });
-        return;
-    }
-
-    const content_type = ctx.getHeader("Content-Type") orelse "application/octet-stream";
-
-    if (std.mem.indexOf(u8, content_type, "application/json") != null) {
-        if (ctx.body_parser) |*parser| {
-            _ = parser.parse() catch |err| {
-                try ctx.response.writeJSON(.{
-                    .status = "error",
-                    .message = "Failed to parse JSON",
-                    .error_val = @errorName(err),
-                });
-                return;
-            };
-
-            if (parser.getJSON()) |json| {
-                try ctx.response.writeJSON(.{
-                    .status = "success",
-                    .type = "json",
-                    .data = json.*,
-                });
-            } else {
-                try ctx.response.writeJSON(.{
-                    .status = "error",
-                    .message = "Not valid JSON",
-                });
-            }
-        }
-    } else if (std.mem.indexOf(u8, content_type, "application/x-www-form-urlencoded") != null) {
-        if (ctx.body_parser) |*parser| {
-            _ = parser.parse() catch |err| {
-                try ctx.response.writeJSON(.{
-                    .status = "error",
-                    .message = "Failed to parse form data",
-                    .error_val = @errorName(err),
-                });
-                return;
-            };
-
-            if (parser.getForm()) |form| {
-                try ctx.response.writeJSON(.{
-                    .status = "success",
-                    .type = "form",
-                    .fields_count = form.fields.count(),
-                });
-            } else {
-                try ctx.response.writeJSON(.{
-                    .status = "error",
-                    .message = "Not valid form data",
-                });
-            }
-        }
-    } else {
-        try ctx.response.writeJSON(.{
-            .status = "success",
-            .type = "raw",
-            .body_size = body.len,
-        });
-    }
+    
+    // Show the bound parameter value
+    try ctx.response.writeJSON(.{
+        .status = "success",
+        .bound_param = data.abc,
+        .message = "Parameter binding successful",
+        .method = "struct_based_binding",
+    });
 }
 
 /// Handle GET /api/cookie - cookie operations

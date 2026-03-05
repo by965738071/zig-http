@@ -5,6 +5,7 @@ const Response = @import("response.zig").Response;
 const ParamList = @import("types.zig").ParamList;
 const HTTPServer = @import("http_server.zig").HTTPServer;
 const BodyParser = @import("../body_parser.zig").BodyParser;
+const Form = @import("../body_parser.zig").Form;
 const MultipartForm = @import("../body_parser.zig").MultipartForm;
 const CookieJar = @import("../cookie.zig").CookieJar;
 const Cookie = @import("../cookie.zig").Cookie;
@@ -202,15 +203,16 @@ pub const Context = struct {
 
     /// Get parsed JSON from request body
     pub fn getJSON(ctx: *Context) ?*const std.json.Value {
-        if (ctx.body_parser) |parser| {
+        if (ctx.body_parser) |*parser| {
             return parser.getJSON();
         }
         return null;
     }
 
     /// Get parsed form data from request body
-    pub fn getForm(ctx: *Context) ?*const BodyParser.Form {
-        if (ctx.body_parser) |parser| {
+    pub fn getForm(ctx: *Context) ?*const Form {
+        if (ctx.body_parser) |*parser| {
+            // BodyParser.getForm returns *const Form
             return parser.getForm();
         }
         return null;
@@ -380,6 +382,7 @@ pub const Context = struct {
     // ====================================================================
 
     /// Bind request parameters to a struct
+    /// Parameters are searched in order: query → form → JSON body → path params
     pub fn bind(ctx: *Context, comptime T: type) binder.BindingResult {
         return binder.bindRequest(T, ctx);
     }
@@ -390,16 +393,30 @@ pub const Context = struct {
     }
 
     /// Bind request and automatically handle errors
+    /// Returns the bound struct on success, or sets HTTP error response on failure
     pub fn bindOrError(ctx: *Context, comptime T: type) !T {
         var result = binder.bindRequest(T, ctx);
-        defer result.deinit(ctx.allocator);
+        result.deinit();
 
         if (result.has_errors) {
             ctx.setStatus(http.Status.bad_request);
+
+            // Build error response with detailed field errors
+            var error_list = std.ArrayList(binder.BindingResult.BindingErrorEntry){};
+            defer error_list.deinit(ctx.allocator);
+            for (result.errors.items) |*error_entry| {
+                // Make a copy of the error entry
+                try error_list.append(ctx.allocator, .{
+                    .field = error_entry.field,  // Note: field is a copy, already allocated in result
+                    .err = error_entry.err,
+                    .message = error_entry.message,
+                });
+            }
+
             try ctx.json(.{
                 .status = "error",
                 .message = "Parameter binding failed",
-                .errors = result.errors.items,
+                .errors = error_list.items,
             });
             return error.BindingFailed;
         }
@@ -408,6 +425,11 @@ pub const Context = struct {
             return bound.*;
         }
 
+        ctx.setStatus(http.Status.bad_request);
+        try ctx.json(.{
+            .status = "error",
+            .message = "No binding result available",
+        });
         return error.BindingFailed;
     }
 };

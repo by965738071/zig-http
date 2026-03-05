@@ -4,6 +4,7 @@ const http = std.http;
 const ParamList = @import("types.zig").ParamList;
 const Handler = @import("types.zig").Handler;
 const Middleware = @import("middleware.zig").Middleware;
+const wrapHandler = @import("types.zig").wrapHandler;
 
 pub const Router = struct {
     allocator: std.mem.Allocator,
@@ -104,6 +105,16 @@ pub const Router = struct {
 
         current.handler = handler;
         current.method = method;
+    }
+
+    /// Add route with automatic parameter binding
+    /// Supports handlers with custom parameters like: fn(ctx: *Context, id: u32) !void
+    /// Example:
+    ///   pub fn getUser(ctx: *Context, id: u32) !void { ... }
+    ///   router.addRouteWithBinding(http.Method.GET, "/users/:id", getUser);
+    pub fn addRouteWithBinding(router: *Router, method: http.Method, path: []const u8, handler_fn: anytype) !void {
+        const wrapped_handler = wrapHandler(handler_fn);
+        try router.addRoute(method, path, wrapped_handler);
     }
 
     pub fn findRoute(router: *Router, method: http.Method, path: []const u8) !?Route {
