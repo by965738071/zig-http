@@ -383,53 +383,29 @@ pub const Context = struct {
 
     /// Bind request parameters to a struct
     /// Parameters are searched in order: query → form → JSON body → path params
-    pub fn bind(ctx: *Context, comptime T: type) binder.BindingResult {
-        return binder.bindRequest(T, ctx);
+    pub fn bind(ctx: *Context, comptime T: type) !T {
+        const b = binder.Binder.init(ctx.allocator, ctx);
+        return b.bind(T);
     }
 
     /// Bind JSON body to a struct
     pub fn bindJSON(ctx: *Context, comptime T: type) !T {
-        return binder.bindJSONBody(T, ctx);
+        const b = binder.Binder.init(ctx.allocator, ctx);
+        return b.bind(T);
     }
 
     /// Bind request and automatically handle errors
     /// Returns the bound struct on success, or sets HTTP error response on failure
     pub fn bindOrError(ctx: *Context, comptime T: type) !T {
-        var result = binder.bindRequest(T, ctx);
-        result.deinit();
-
-        if (result.has_errors) {
+        const b = binder.Binder.init(ctx.allocator, ctx);
+        return b.bind(T) catch |e| {
             ctx.setStatus(http.Status.bad_request);
-
-            // Build error response with detailed field errors
-            var error_list = std.ArrayList(binder.BindingResult.BindingErrorEntry){};
-            defer error_list.deinit(ctx.allocator);
-            for (result.errors.items) |*error_entry| {
-                // Make a copy of the error entry
-                try error_list.append(ctx.allocator, .{
-                    .field = error_entry.field,  // Note: field is a copy, already allocated in result
-                    .err = error_entry.err,
-                    .message = error_entry.message,
-                });
-            }
-
             try ctx.json(.{
                 .status = "error",
                 .message = "Parameter binding failed",
-                .errors = error_list.items,
+                .reason = @errorName(e),
             });
-            return error.BindingFailed;
-        }
-
-        if (binder.getBoundValue(T, &result)) |bound| {
-            return bound.*;
-        }
-
-        ctx.setStatus(http.Status.bad_request);
-        try ctx.json(.{
-            .status = "error",
-            .message = "No binding result available",
-        });
-        return error.BindingFailed;
+            return e;
+        };
     }
 };

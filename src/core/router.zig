@@ -9,6 +9,15 @@ const wrapHandler = @import("types.zig").wrapHandler;
 pub const Router = struct {
     allocator: std.mem.Allocator,
     root: *RouteNode,
+    route_cache: std.StringHashMap(CachedRoute),
+    cache_max_size: usize,
+
+    const CachedRoute = struct {
+        handler: Handler,
+        params: ParamList,
+        middlewares: []*Middleware,
+        hit_count: usize,
+    };
 
     pub const RouteNode = struct {
         allocator: std.mem.Allocator,
@@ -66,11 +75,14 @@ pub const Router = struct {
         return .{
             .allocator = allocator,
             .root = root,
+            .route_cache = std.StringHashMap(CachedRoute).init(allocator),
+            .cache_max_size = 128,
         };
     }
 
     pub fn deinit(router: *Router) void {
         router.root.deinit();
+        router.route_cache.deinit();
     }
 
     pub fn addRoute(router: *Router, method: http.Method, path: []const u8, handler: Handler) !void {
@@ -118,6 +130,25 @@ pub const Router = struct {
     }
 
     pub fn findRoute(router: *Router, method: http.Method, path: []const u8) !?Route {
+        // Create cache key from method and path
+        const cache_key = try std.fmt.allocPrint(router.allocator, "{s}|{s}", .{ @tagName(method), path });
+        defer router.allocator.free(cache_key);
+
+        // Check cache first
+        if (router.route_cache.get(cache_key)) |cached| {
+            // Return a copy of params to avoid mutation issues
+            var params = ParamList.init(router.allocator);
+            var it = cached.params.iterator();
+            while (it.next()) |entry| {
+                try params.put(entry.key_ptr.*, entry.value_ptr.*);
+            }
+            return .{
+                .handler = cached.handler,
+                .params = params,
+                .middlewares = cached.middlewares,
+            };
+        }
+
         var params = ParamList.init(router.allocator);
 
         // Remove query string from path
@@ -127,6 +158,15 @@ pub const Router = struct {
         var trimmed_path = std.mem.trim(u8, clean_path, "/");
         if (trimmed_path.len == 0) {
             if (router.root.handler) |handler| {
+                // Cache the result
+                if (router.route_cache.count() < router.cache_max_size) {
+                    try router.route_cache.put(try router.allocator.dupe(u8, cache_key), .{
+                        .handler = handler,
+                        .params = params,
+                        .middlewares = router.root.middlewares.items,
+                        .hit_count = 1,
+                    });
+                }
                 return .{
                     .handler = handler,
                     .params = params,
@@ -157,6 +197,15 @@ pub const Router = struct {
         }
 
         if (current.handler != null and current.method == method) {
+            // Cache the result
+            if (router.route_cache.count() < router.cache_max_size) {
+                try router.route_cache.put(try router.allocator.dupe(u8, cache_key), .{
+                    .handler = current.handler.?,
+                    .params = params,
+                    .middlewares = current.middlewares.items,
+                    .hit_count = 1,
+                });
+            }
             return .{
                 .handler = current.handler.?,
                 .params = params,

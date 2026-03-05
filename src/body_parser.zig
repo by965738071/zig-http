@@ -42,7 +42,7 @@ pub const Form = struct {
         form.fields.deinit();
     }
 
-    pub fn get(form: *Form, key: []const u8) ?[]const u8 {
+    pub fn get(form: *const Form, key: []const u8) ?[]const u8 {
         if (form.fields.get(key)) |value| {
             switch (value) {
                 .single => |s| return s,
@@ -403,7 +403,6 @@ pub const UrlEncodedFormParser = struct {
 
     /// Decode URL-encoded percent-encoding
     fn percentDecode(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
-
         var result = std.ArrayList(u8){};
         errdefer result.deinit(allocator);
 
@@ -433,7 +432,7 @@ pub const UrlEncodedFormParser = struct {
         const allocator = std.testing.allocator;
         const data = "name=John&age=30&city=New+York";
 
-        var form = try parse(allocator, data);
+        var form = try UrlEncodedFormParser.parse(allocator, data);
         defer form.deinit();
 
         try std.testing.expectEqualStrings("John", form.get("name").?);
@@ -445,7 +444,7 @@ pub const UrlEncodedFormParser = struct {
         const allocator = std.testing.allocator;
         const data = "colors=red&colors=blue&colors=green";
 
-        var form = try parse(allocator, data);
+        var form = try UrlEncodedFormParser.parse(allocator, data);
         defer form.deinit();
 
         const colors = form.getAll("colors").?;
@@ -459,7 +458,7 @@ pub const UrlEncodedFormParser = struct {
         const allocator = std.testing.allocator;
         const input = "Hello%20World%21";
 
-        const decoded = try percentDecode(allocator, input);
+        const decoded = try UrlEncodedFormParser.percentDecode(allocator, input);
         defer allocator.free(decoded);
 
         try std.testing.expectEqualStrings("Hello World!", decoded);

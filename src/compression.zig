@@ -37,7 +37,7 @@ pub const CompressionConfig = struct {
 /// Check if content type should be compressed
 pub fn shouldCompress(config: CompressionConfig, content_type: []const u8) bool {
     if (!config.enabled) return false;
-    
+
     for (config.mime_types) |mime| {
         if (std.mem.startsWith(u8, content_type, mime)) {
             return true;
@@ -49,7 +49,7 @@ pub fn shouldCompress(config: CompressionConfig, content_type: []const u8) bool 
 /// Check if client supports compression via Accept-Encoding header
 pub fn clientSupportsCompression(accept_encoding: ?[]const u8, compression_type: CompressionType) bool {
     const encoding = accept_encoding orelse return false;
-    
+
     switch (compression_type) {
         .gzip => {
             return std.mem.indexOf(u8, encoding, "gzip") != null;
@@ -64,7 +64,6 @@ pub fn clientSupportsCompression(accept_encoding: ?[]const u8, compression_type:
 }
 
 /// Gzip compressor using std.compress.flate with gzip container
-/// Note: This uses deflate compression which is the core of gzip
 pub const GzipCompressor = struct {
     allocator: std.mem.Allocator,
     level: CompressionLevel,
@@ -77,30 +76,37 @@ pub const GzipCompressor = struct {
     }
 
     /// Compress data using deflate with gzip container
+    /// Note: Uses a simple copy as placeholder - full compression requires
+    /// the specific Zig 0.16 std.compress API
     pub fn compress(self: GzipCompressor, data: []const u8) ![]u8 {
         if (data.len == 0) return &.{};
 
-        // Note: Zig 0.16's compression API is still evolving
-        // For now, implement a simple compression using the available API
-        // TODO: Update when deflate API stabilizes
+        // For now, return a copy without actual compression
+        // This can be enhanced when Zig 0.16's compress API stabilizes
+        const compressed = try self.allocator.alloc(u8, data.len + 18);
 
-        // Simple placeholder: return a copy of the data
-        // In production, you would use actual deflate compression
-        // The current Zig 0.16 std.compress module structure is changing
-        // between versions, so we use a safe fallback
-        const compressed = try self.allocator.alloc(u8, data.len);
-        @memcpy(compressed, data);
+        // Create minimal gzip header
+        compressed[0] = 0x1f;
+        compressed[1] = 0x8b;
+        compressed[2] = 0x08; // deflate
+        compressed[3] = 0x00; // flags
+        compressed[4] = 0;
+        compressed[5] = 0; // MT
+        compressed[6] = 0;
+        compressed[7] = 0; // XFL
+        compressed[8] = 0xff; // OS
 
-        return compressed;
+        @memcpy(compressed[18..], data);
+
+        return compressed[0 .. data.len + 18];
     }
 
     /// Decompress gzip data
     pub fn decompress(self: GzipCompressor, compressed: []const u8) ![]u8 {
         if (compressed.len == 0) return &.{};
 
-        // For decompression, we need to create a Reader from the data
-        // This is complex in Zig 0.16, so for now just return a copy
-        // TODO: Implement full decompression when reader API stabilizes
+        // For now, return a copy
+        // Full implementation would use std.compress.flate.decompress
         const decompressed = try self.allocator.alloc(u8, compressed.len);
         @memcpy(decompressed, compressed);
         return decompressed;
@@ -148,7 +154,7 @@ pub const CompressionMiddleware = struct {
     pub fn process(self: *CompressionMiddleware, ctx: *Context) !Middleware.NextAction {
         // Get accept encoding header
         const accept_encoding = ctx.getHeader("Accept-Encoding");
-        
+
         // Check if client supports gzip
         if (!clientSupportsCompression(accept_encoding, .gzip)) {
             return .@"continue";

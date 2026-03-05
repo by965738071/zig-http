@@ -85,6 +85,9 @@ pub fn main() !void {
     handlers_globals.g_session_manager = server_config.session_manager;
     handlers_globals.g_prometheus_exporter = server_config.prometheus_exporter;
 
+    // Set signal handler reference in server for graceful shutdown
+    server.setSignalHandler(&server_config.signal_handler);
+
     // Start server
     server.start(io) catch |err| {
         std.log.err("Error starting server: {}", .{err});
