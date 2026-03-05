@@ -99,8 +99,43 @@ pub fn bindRequest(comptime T: type, ctx: *Context) BindingResult {
     inline for (struct_fields) |field| {
         std.log.debug("Processing field: '{s}' (type: {})", .{field.name, field.type});
 
-        const param_value = getParamForField(ctx, field.name) orelse {
-            if (!isOptional(field.type)) {
+        const param_value = getParamForField(ctx, field.name);
+
+        // Use inline if to avoid comptime control flow in runtime block
+        if (comptime isOptional(field.type)) {
+            // Optional field
+            if (param_value) |value| {
+                std.log.debug("Optional field '{s}' found with value: '{s}'", .{field.name, value});
+                const parsed = parseFieldType(field.type, value, ctx.allocator) catch |err| {
+                    const msg = std.fmt.allocPrint(ctx.allocator, "Failed to parse field '{s}': {}", .{field.name, err}) catch "Parse error";
+                    result.addError(field.name, err, msg) catch |e| {
+                        std.log.warn("Failed to add binding error: {}", .{e});
+                        ctx.allocator.free(msg);
+                    };
+                    return;
+                };
+                @field(instance, field.name) = parsed;
+                std.log.debug("Field '{s}' successfully parsed", .{field.name});
+            } else {
+                // Optional field not found, set to null
+                @field(instance, field.name) = null;
+                std.log.debug("Optional field '{s}' not found, set to null", .{field.name});
+            }
+        } else {
+            // Required field
+            if (param_value) |value| {
+                std.log.debug("Field '{s}' found with value: '{s}'", .{field.name, value});
+                const parsed = parseFieldType(field.type, value, ctx.allocator) catch |err| {
+                    const msg = std.fmt.allocPrint(ctx.allocator, "Failed to parse field '{s}': {}", .{field.name, err}) catch "Parse error";
+                    result.addError(field.name, err, msg) catch |e| {
+                        std.log.warn("Failed to add binding error: {}", .{e});
+                        ctx.allocator.free(msg);
+                    };
+                    return;
+                };
+                @field(instance, field.name) = parsed;
+                std.log.debug("Field '{s}' successfully parsed", .{field.name});
+            } else {
                 const msg = std.fmt.allocPrint(ctx.allocator, "Required parameter '{s}' not found in query, form, path, or JSON body", .{field.name}) catch "Parameter not found";
                 result.addError(field.name, BindingError.MissingRequiredParameter, msg) catch |e| {
                     std.log.err("Failed to add binding error: {}", .{e});
@@ -108,30 +143,8 @@ pub fn bindRequest(comptime T: type, ctx: *Context) BindingResult {
                         ctx.allocator.free(msg);
                     }
                 };
-            } else {
-                // Optional field not found, set to null
-                // Use comptime to correctly set optional field to null
-                comptime {
-                    @field(instance, field.name) = @as(field.type, null);
-                }
-                std.log.debug("Optional field '{s}' not found, set to null", .{field.name});
             }
-            continue;
-        };
-
-        std.log.debug("Field '{s}' found with value: '{s}'", .{field.name, param_value});
-
-        const parsed = parseFieldType(field.type, param_value, ctx.allocator) catch |err| {
-            const msg = std.fmt.allocPrint(ctx.allocator, "Failed to parse field '{s}': {}", .{field.name, err}) catch "Parse error";
-            result.addError(field.name, err, msg) catch |e| {
-                std.log.warn("Failed to add binding error: {}", .{e});
-                ctx.allocator.free(msg);
-            };
-            continue;
-        };
-
-        @field(instance, field.name) = parsed;
-        std.log.debug("Field '{s}' successfully parsed", .{field.name});
+        }
     }
 
     result.target = &instance;
