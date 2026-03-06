@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const httpServer = @import("core/http_server.zig").HTTPServer;
 const router = @import("core/router.zig").Router;
 const http = std.http;
@@ -86,7 +87,7 @@ pub fn main() !void {
     handlers_globals.g_prometheus_exporter = server_config.prometheus_exporter;
 
     // Set signal handler reference in server for graceful shutdown
-    server.setSignalHandler(&server_config.signal_handler);
+    //server.setSignalHandler(&server_config.signal_handler);
 
     // Start server
     server.start(io) catch |err| {
@@ -325,11 +326,11 @@ fn setupMiddlewares(allocator: std.mem.Allocator, server: *httpServer) !void {
     var auth_middleware = try AuthMiddleware.init(allocator, "my-secret-token");
 
     const skip_paths = &[_][]const u8{
-        "/", "/api/data", "/api/submit", "/api/upload", "/api/session",
-        "/api/cookie", "/api/template", "/api/compress", "/api/metrics",
-        "/api/client", "/api/health", "/api/benchmark", "/api/tests",
-        "/api/upload/progress", "/api/log/demo", "/api/stream/sse",
-        "/api/stream/chunk", "/metrics", "/static/*", "/ws", "/ws/echo",
+        "/",               "/api/data",         "/api/submit",   "/api/upload",          "/api/session",
+        "/api/cookie",     "/api/template",     "/api/compress", "/api/metrics",         "/api/client",
+        "/api/health",     "/api/benchmark",    "/api/tests",    "/api/upload/progress", "/api/log/demo",
+        "/api/stream/sse", "/api/stream/chunk", "/metrics",      "/static/*",            "/ws",
+        "/ws/echo",
     };
 
     for (skip_paths) |path| {

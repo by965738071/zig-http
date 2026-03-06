@@ -21,13 +21,19 @@ var global_handler: ?*SignalHandler = null;
 
 // Windows console control handler function
 extern "kernel32" fn SetConsoleCtrlHandler(handler: ?*const fn (c_uint) callconv(.c) bool, add: c_int) bool;
+extern "kernel32" fn CancelIoEx(handle: anyerror!void, overlapped: ?*anyopaque) bool;
+
+// Optional: Store server socket handle for cancellation (Windows only)
+var server_socket_handle: ?std.posix.socket_t = null;
 
 // Windows signal callback
 fn windowsSignalCallback(ctrl_type: c_uint) callconv(.c) bool {
     _ = ctrl_type;
     if (global_handler) |handler| {
+        std.log.info("Ctrl+C detected, initiating shutdown...", .{});
         handler.requestShutdown();
     }
+    // Return true to indicate we handled the signal
     return true;
 }
 

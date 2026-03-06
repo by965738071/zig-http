@@ -284,7 +284,7 @@ pub const HTTPServer = struct {
 
         // Accept loop
         while (server.running and !server.isShuttingDown()) {
-            // Check signal handler if available
+            // Check signal handler if available BEFORE blocking accept
             if (server.signal_handler) |handler_ptr| {
                 const SignalHandler = @import("../signal_handler.zig").SignalHandler;
                 const handler = @as(*const SignalHandler, @ptrCast(@alignCast(handler_ptr)));
@@ -295,14 +295,37 @@ pub const HTTPServer = struct {
                 }
             }
 
+            // Note: accept() is blocking. On Windows, the signal handler callback
+            // is executed in a separate thread by the system. We rely on the
+            // handler setting shutdown_requested which will be checked on the
+            // next iteration. To improve responsiveness, we could use
+            // non-blocking sockets or poll with timeout.
+
             const stream = server.tcp_server.accept(io) catch |err| {
+                // Check if shutdown was requested while waiting
                 if (server.isShuttingDown()) {
                     std.log.info("Graceful shutdown: stopping accept loop", .{});
                     break;
                 }
+                if (server.signal_handler) |handler_ptr| {
+                    const SignalHandler = @import("../signal_handler.zig").SignalHandler;
+                    const handler = @as(*const SignalHandler, @ptrCast(@alignCast(handler_ptr)));
+                    if (handler.isShutdownRequested()) {
+                        std.log.info("Shutdown signal received during accept wait", .{});
+                        server.requestShutdown();
+                        break;
+                    }
+                }
                 std.log.err("Accept failed: {}", .{err});
                 continue;
             };
+
+            // Double-check shutdown after accept returns
+            if (server.isShuttingDown()) {
+                stream.close(io);
+                std.log.info("Graceful shutdown: closing accepted connection", .{});
+                break;
+            }
 
             server.addActiveConnection();
             // Handle connection
