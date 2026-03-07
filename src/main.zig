@@ -38,7 +38,8 @@ const handlers_globals = @import("handlers/globals.zig");
 
 // Global state for handler access (now defined in handlers/globals.zig)
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    _ = init;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer {
         const check = gpa.deinit();
@@ -65,7 +66,7 @@ pub fn main() !void {
     defer route.deinit();
 
     // Configure HTTP server
-    var server = try httpServer.init(allocator, .{
+    var server = try httpServer.init(allocator, io, .{
         .port = 8080,
         .host = "0.0.0.0",
     });
@@ -90,7 +91,7 @@ pub fn main() !void {
     //server.setSignalHandler(&server_config.signal_handler);
 
     // Start server
-    server.start(io) catch |err| {
+    server.start() catch |err| {
         std.log.err("Error starting server: {}", .{err});
         return err;
     };

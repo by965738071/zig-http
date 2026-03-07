@@ -4,9 +4,9 @@ const std = @import("std");
 
 /// Memory pool configuration
 pub const PoolConfig = struct {
-    block_size: usize = 4096,           // Size of each memory block
-    max_blocks: usize = 1024,            // Maximum number of blocks
-    small_size_threshold: usize = 256,   // Threshold for small object optimization
+    block_size: usize = 4096, // Size of each memory block
+    max_blocks: usize = 1024, // Maximum number of blocks
+    small_size_threshold: usize = 256, // Threshold for small object optimization
 };
 
 /// Memory pool for fixed-size allocations
@@ -15,10 +15,10 @@ pub const MemoryPool = struct {
     free_list: std.ArrayList(usize),
     config: PoolConfig,
     allocator: std.mem.Allocator,
-    io: std.Io.Threaded,
+    io: std.Io,
     used_blocks: usize,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io.Threaded, config: PoolConfig) MemoryPool {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, config: PoolConfig) MemoryPool {
         return .{
             .io = io,
             .blocks = std.ArrayList([]u8){},

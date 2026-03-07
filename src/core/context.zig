@@ -4,9 +4,9 @@ const http = std.http;
 const Response = @import("response.zig").Response;
 const ParamList = @import("types.zig").ParamList;
 const HTTPServer = @import("http_server.zig").HTTPServer;
-const BodyParser = @import("../body_parser.zig").BodyParser;
-const Form = @import("../body_parser.zig").Form;
-const MultipartForm = @import("../body_parser.zig").MultipartForm;
+const BodyParser = @import("body_parser.zig").BodyParser;
+const Form = @import("body_parser.zig").Form;
+const MultipartForm = @import("body_parser.zig").MultipartForm;
 const CookieJar = @import("../cookie.zig").CookieJar;
 const Cookie = @import("../cookie.zig").Cookie;
 const Session = @import("../session.zig").Session;
@@ -253,7 +253,7 @@ pub const Context = struct {
         const data = ctx.getBody();
         if (data.len == 0) return null;
 
-        const MultipartParser = @import("../body_parser.zig").MultipartParser;
+        const MultipartParser = @import("body_parser.zig").MultipartParser;
         const boundary = MultipartParser.extractBoundary(content_type) catch |parse_err| {
             std.log.warn("Failed to extract multipart boundary: {}", .{parse_err});
             return null;

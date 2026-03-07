@@ -3,7 +3,7 @@ const http = std.http;
 const Context = @import("../core/context.zig").Context;
 const UploadTracker = @import("../upload_progress.zig").UploadTracker;
 const globals = @import("globals.zig");
-const MultipartParser = @import("../body_parser.zig").MultipartParser;
+const MultipartParser = @import("../core/body_parser.zig").MultipartParser;
 
 /// Handle POST /api/upload - file upload handler
 pub fn handleUpload(ctx: *Context) !void {

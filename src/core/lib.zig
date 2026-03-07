@@ -1,9 +1,7 @@
-/// Core HTTP server library
-/// This module provides the fundamental building blocks for the HTTP server
-
-pub const Server = @import("http_server.zig").HTTPServer;
-pub const Router = @import("router.zig").Router;
-pub const Context = @import("context.zig").Context;
-pub const Response = @import("response.zig").Response;
-pub const Types = @import("types.zig");
-pub const Middleware = @import("middleware.zig").Middleware;
+pub const http_server = @import("http_server.zig");
+pub const router = @import("router.zig");
+pub const context = @import("context.zig");
+pub const response = @import("response.zig");
+pub const types = @import("types.zig");
+pub const middleware = @import("middleware.zig");
+pub const error_handler = @import("../features/error_handler.zig");
