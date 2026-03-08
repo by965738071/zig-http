@@ -8,17 +8,17 @@ const Context = @import("context.zig").Context;
 const Response = @import("response.zig").Response;
 const Config = @import("types.zig").Config;
 const Handler = @import("types.zig").Handler;
-
-// Features (optional dependencies - passed via set methods)
-const WebSocketServer = extern struct { const Context = opaque; };
-const StaticServer = extern struct {};
-const RateLimiter = extern struct {};
-const Metrics = extern struct {};
-const ErrorHandler = extern struct { const Logger = opaque; };
-const StringInterner = extern struct {};
-const InterceptorRegistry = extern struct {};
-const BufferPool = extern struct {};
-const MemoryPool = extern struct {};
+const StaticServer = @import("../static_server.zig").StaticServer;
+const RateLimiter = @import("../rate_limiter.zig").RateLimiter;
+const Metrics = @import("../monitoring.zig").Metrics;
+const ErrorHandler = @import("../error_handler.zig").ErrorHandler;
+const Logger = @import("../error_handler.zig").Logger;
+const WebSocketServer = @import("../websocket.zig").WebSocketServer;
+const StringInterner = @import("../zero_copy.zig").StringInterner;
+const InterceptorRegistry = @import("../interceptor.zig").InterceptorRegistry;
+const WebSocketContext = @import("../websocket.zig").WebSocketContext;
+const BufferPool = @import("../memory_pool.zig").BufferPool;
+const MemoryPool = @import("../memory_pool.zig").MemoryPool;
 
 // Helper: read exactly `buf.len` bytes from a reader (returns number read or error)
 // Use Reader vtable's readVec when available (0.16 reader API).
@@ -126,10 +126,10 @@ pub const HTTPServer = struct {
     /// Signal handler for graceful shutdown
     signal_handler: ?*const anyopaque = null,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, config: Config) !HTTPServer {
+    pub fn init(allocator: std.mem.Allocator, config: Config) !HTTPServer {
         // Create memory pool for request-scoped allocations
         const memory_pool = try allocator.create(MemoryPool);
-        memory_pool.* = MemoryPool.init(allocator, io, .{
+        memory_pool.* = MemoryPool.init(allocator, std.Io.Threaded.init(allocator, .{ .environ = .empty }), .{
             .block_size = 4096,
             .max_blocks = 1024,
             .small_size_threshold = 256,
@@ -137,7 +137,7 @@ pub const HTTPServer = struct {
 
         return .{
             .allocator = allocator,
-            .io = io,
+            .io = undefined,
             .tcp_server = undefined,
             .router = try Router.init(allocator),
             .middlewares = std.ArrayList(*Middleware){},
@@ -263,7 +263,8 @@ pub const HTTPServer = struct {
         // This is a simplified version for demonstration
     }
 
-    pub fn start(server: *HTTPServer) !void {
+    pub fn start(server: *HTTPServer, io: Io) !void {
+        server.io = io;
         server.running = true;
 
         const host_str = try std.fmt.allocPrint(server.allocator, "{s}:{d}", .{
@@ -283,7 +284,24 @@ pub const HTTPServer = struct {
 
         // Accept loop
         while (server.running and !server.isShuttingDown()) {
-            const stream = server.tcp_server.accept(server.io) catch |err| {
+            // Check signal handler if available BEFORE blocking accept
+            if (server.signal_handler) |handler_ptr| {
+                const SignalHandler = @import("../signal_handler.zig").SignalHandler;
+                const handler = @as(*const SignalHandler, @ptrCast(@alignCast(handler_ptr)));
+                if (handler.isShutdownRequested()) {
+                    std.log.info("Shutdown signal received, stopping accept loop", .{});
+                    server.requestShutdown();
+                    break;
+                }
+            }
+
+            // Note: accept() is blocking. On Windows, the signal handler callback
+            // is executed in a separate thread by the system. We rely on the
+            // handler setting shutdown_requested which will be checked on the
+            // next iteration. To improve responsiveness, we could use
+            // non-blocking sockets or poll with timeout.
+
+            const stream = server.tcp_server.accept(io) catch |err| {
                 // Check if shutdown was requested while waiting
                 if (server.isShuttingDown()) {
                     std.log.info("Graceful shutdown: stopping accept loop", .{});
@@ -304,14 +322,14 @@ pub const HTTPServer = struct {
 
             // Double-check shutdown after accept returns
             if (server.isShuttingDown()) {
-                stream.close(server.io);
+                stream.close(io);
                 std.log.info("Graceful shutdown: closing accepted connection", .{});
                 break;
             }
 
             server.addActiveConnection();
             // Handle connection
-            _ = server.io.async(handleConnection, .{ server, stream });
+            _ = io.async(handleConnection, .{ server, stream });
         }
 
         // Wait for active connections to complete (graceful shutdown)
@@ -585,7 +603,7 @@ fn handleConnection(server: *HTTPServer, stream: Io.net.Stream) void {
         if (body.len > 0 and body_owned) {
             // Initialize body parser with the content type and body data
             const content_type = context.getHeader("Content-Type");
-            context.body_parser = BodyParser.init(
+            context.body_parser = @import("../body_parser.zig").BodyParser.init(
                 server.allocator,
                 content_type,
                 body,
