@@ -1,6 +1,6 @@
 const std = @import("std");
 const http = std.http;
-const Context = @import("../core/context.zig").Context;
+const Context = @import("core/context.zig").Context;
 
 /// Health check endpoint
 pub fn handleHealth(ctx: *Context) !void {

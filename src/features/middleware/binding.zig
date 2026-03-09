@@ -1,6 +1,6 @@
 const std = @import("std");
-const Context = @import("../core/context.zig").Context;
-const Binder = @import("../core/binder.zig").Binder;
+const Context = @import("../../core/context.zig").Context;
+const Binder = @import("../../core/binder.zig").Binder;
 
 pub const BindingMiddleware = struct {
     pub fn handle(ctx: *Context, comptime T: type, handler: *const fn (ctx: *Context, data: T) anyerror!void) !void {

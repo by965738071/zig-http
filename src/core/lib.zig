@@ -4,4 +4,4 @@ pub const context = @import("context.zig");
 pub const response = @import("response.zig");
 pub const types = @import("types.zig");
 pub const middleware = @import("middleware.zig");
-pub const error_handler = @import("../features/error_handler.zig");
+pub const error_handler = @import("error_handler.zig");

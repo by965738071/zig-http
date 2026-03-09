@@ -7,12 +7,12 @@ const HTTPServer = @import("http_server.zig").HTTPServer;
 const BodyParser = @import("body_parser.zig").BodyParser;
 const Form = @import("body_parser.zig").Form;
 const MultipartForm = @import("body_parser.zig").MultipartForm;
-const CookieJar = @import("../cookie.zig").CookieJar;
-const Cookie = @import("../cookie.zig").Cookie;
-const Session = @import("../session.zig").Session;
-const SessionManager = @import("../session.zig").SessionManager;
+const CookieJar = @import("../features/cookie.zig").CookieJar;
+const Cookie = @import("../features/cookie.zig").Cookie;
+const Session = @import("../features/session.zig").Session;
+const SessionManager = @import("../features/session.zig").SessionManager;
 const utils = @import("../utils.zig");
-const StringInterner = @import("../zero_copy.zig").StringInterner;
+const StringInterner = @import("../utils/zero_copy.zig").StringInterner;
 const binder = @import("binder.zig");
 
 pub const Context = struct {
@@ -188,7 +188,7 @@ pub const Context = struct {
         ptr.* = value;
 
         // Use server's StringInterner for state keys
-        const key_interned = try ctx.server.string_interner.intern(key);
+        const key_interned = ctx.server.stringInterner.get(key) orelse return error.InvalidStateKey;
         try ctx.state.put(key_interned, @ptrCast(ptr));
     }
 

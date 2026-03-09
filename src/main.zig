@@ -4,37 +4,41 @@ const httpServer = @import("core/http_server.zig").HTTPServer;
 const router = @import("core/router.zig").Router;
 const http = std.http;
 const Context = @import("core/context.zig").Context;
+const Logger = @import("core/error_handler.zig").Logger;
 
 // Middleware
-const AuthMiddleware = @import("middleware/auth.zig").AuthMiddleware;
-const XSSMiddleware = @import("middleware/xss.zig").XSSMiddleware;
-const CSRFMiddleware = @import("middleware/csrf.zig").CSRFMiddleware;
-const LoggingMiddleware = @import("middleware/logging.zig").LoggingMiddleware;
-const CORSMiddleware = @import("middleware/cors.zig").CORSMiddleware;
+const AuthMiddleware = @import("features/middleware/auth.zig").AuthMiddleware;
+const XSSMiddleware = @import("features/middleware/xss.zig").XSSMiddleware;
+const CSRFMiddleware = @import("features/middleware/csrf.zig").CSRFMiddleware;
+const LoggingMiddleware = @import("features/middleware/logging.zig").LoggingMiddleware;
+const CORSMiddleware = @import("features/middleware/cors.zig").CORSMiddleware;
 
 // Features
-const WebSocketServer = @import("websocket.zig").WebSocketServer;
-const StaticServer = @import("static_server.zig").StaticServer;
-const RateLimiter = @import("rate_limiter.zig").RateLimiter;
-const Metrics = @import("monitoring.zig").Metrics;
-const Logger = @import("error_handler.zig").Logger;
-const SessionManager = @import("session.zig").SessionManager;
-const MemorySessionStore = @import("session.zig").MemorySessionStore;
-const Template = @import("template.zig").Template;
-const IPFilter = @import("security.zig").IPFilter;
-const SignalHandler = @import("signal_handler.zig").SignalHandler;
-const PrometheusExporter = @import("metrics_exporter.zig").PrometheusExporter;
-const StructuredLogger = @import("structured_log.zig").StructuredLogger;
-const UploadTracker = @import("upload_progress.zig").UploadTracker;
-const consoleProgressCallback = @import("upload_progress.zig").consoleProgressCallback;
+const WebSocketServer = @import("features/websocket.zig").WebSocketServer;
+const StaticServer = @import("features/static_server.zig").StaticServer;
+const RateLimiter = @import("features/rate_limiter.zig").RateLimiter;
+const Metrics = @import("features/monitoring.zig").Metrics;
+const SessionManager = @import("features/session.zig").SessionManager;
+const MemorySessionStore = @import("features/session.zig").MemorySessionStore;
+const Template = @import("features/template.zig").Template;
+const IPFilter = @import("features/security.zig").IPFilter;
+const SignalHandler = @import("features/signal_handler.zig").SignalHandler;
+const PrometheusExporter = @import("features/metrics_exporter.zig").PrometheusExporter;
+const StructuredLogger = @import("features/structured_log.zig").StructuredLogger;
+const UploadTracker = @import("features/upload_progress.zig").UploadTracker;
+const consoleProgressCallback = @import("features/upload_progress.zig").consoleProgressCallback;
 
 // Low priority features
-const Interceptor = @import("interceptor.zig").Interceptor;
-const InterceptorRegistry = @import("interceptor.zig").InterceptorRegistry;
+const Interceptor = @import("features/interceptor.zig").Interceptor;
+const InterceptorRegistry = @import("features/interceptor.zig").InterceptorRegistry;
 
-// Handlers (imported from handlers module)
-const handlers = @import("handlers/lib.zig");
-const handlers_globals = @import("handlers/globals.zig");
+// Handlers
+const handlers_home = @import("home.zig").handleHome;
+const handlers_health = @import("health.zig").handleHealth;
+const handlers_api = @import("api.zig");
+const handlers_upload = @import("upload.zig");
+const handlers_static = @import("static.zig").handleStatic;
+const WebSocketContext = @import("features/websocket.zig").WebSocketContext;
 
 // Global state for handler access (now defined in handlers/globals.zig)
 
@@ -50,7 +54,7 @@ pub fn main(init: std.process.Init) !void {
 
     const allocator = gpa.allocator();
     var threaded = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer threaded.deinit();
+    defer threaded.deinit(); 
     const io = threaded.io();
 
     std.log.info("========================================", .{});
@@ -70,31 +74,28 @@ pub fn main(init: std.process.Init) !void {
         .port = 8080,
         .host = "0.0.0.0",
     });
-    server.setWebSocketServer(server_config.ws_server);
-    server.setStaticServer(server_config.static_server);
-    server.setRateLimiter(server_config.rate_limiter);
-    server.setMetrics(server_config.metrics);
-    server.setLogger(server_config.logger);
-    server.setRouter(route);
-    server.setInterceptorRegistry(server_config.interceptor_registry);
+    //server.setWebSocketServer(server_config.ws_server);
+    //server.setStaticServer(server_config.static_server);
+    //server.setRateLimiter(server_config.rate_limiter);
+    //server.setMetrics(server_config.metrics);
+    //server.setLogger(server_config.logger);
+    //server.setRouter(route);
+    //server.setInterceptorRegistry(server_config.interceptor_registry);
 
     // Configure middlewares
     try setupMiddlewares(allocator, &server);
 
     // Set global references
+    const handlers_globals = @import("globals.zig");
     handlers_globals.g_structured_logger = server_config.structured_logger;
     handlers_globals.g_upload_tracker = server_config.upload_tracker;
-    handlers_globals.g_session_manager = server_config.session_manager;
     handlers_globals.g_prometheus_exporter = server_config.prometheus_exporter;
 
     // Set signal handler reference in server for graceful shutdown
     //server.setSignalHandler(&server_config.signal_handler);
 
     // Start server
-    server.start() catch |err| {
-        std.log.err("Error starting server: {}", .{err});
-        return err;
-    };
+    try server.start(io);
 }
 
 /// Server configuration struct
@@ -104,7 +105,6 @@ const ServerConfig = struct {
     rate_limiter: *RateLimiter,
     metrics: *Metrics,
     logger: *Logger,
-    session_manager: *SessionManager,
     template: *Template,
     structured_logger: *StructuredLogger,
     upload_tracker: *UploadTracker,
@@ -121,7 +121,39 @@ const ServerConfig = struct {
 fn initializeServerComponents(allocator: std.mem.Allocator, io: std.Io) !ServerConfig {
     // WebSocket server
     var ws_server = WebSocketServer.init(allocator);
-    try ws_server.handle("/ws/echo", handlers.websocket.echoHandler);
+
+    // Simple WebSocket echo handler
+    const echoHandler = struct {
+        fn echo(ws: *WebSocketContext) !void {
+            std.log.info("WebSocket client connected", .{});
+            try ws.sendText("Welcome to WebSocket echo server!");
+
+            while (true) {
+                var msg = try ws.receive();
+                defer ws.freeMessage(&msg);
+
+                switch (msg.opcode) {
+                    .text, .binary => {
+                        std.log.debug("Received {s} message", .{@tagName(msg.opcode)});
+                        if (msg.opcode == .text) {
+                            try ws.sendText(msg.data);
+                        } else {
+                            try ws.sendBinary(msg.data);
+                        }
+                    },
+                    .ping => {
+                        try ws.pong(msg.data);
+                    },
+                    .connection_close => {
+                        std.log.info("Client requested close", .{});
+                        return;
+                    },
+                    else => continue,
+                }
+            }
+        }
+    }.echo;
+    try ws_server.handle("/ws/echo", echoHandler);
 
     // Static server
     var static_server = try StaticServer.init(allocator, .{
@@ -145,13 +177,6 @@ fn initializeServerComponents(allocator: std.mem.Allocator, io: std.Io) !ServerC
     // Logger - allocate on heap
     const logger = try allocator.create(Logger);
     logger.* = Logger.init(allocator, .info);
-
-    // Session manager - allocate on heap
-    const session_manager = try allocator.create(SessionManager);
-    var session_store = MemorySessionStore.init(allocator, io);
-    session_manager.* = SessionManager.init(allocator, io, &session_store, .{
-        .secret = "secret-key-12345",
-    });
 
     // Template engine - allocate on heap
     const template = try allocator.create(Template);
@@ -182,19 +207,19 @@ fn initializeServerComponents(allocator: std.mem.Allocator, io: std.Io) !ServerC
 
     // Built-in interceptors - allocate on heap
     const logging_interceptor = try allocator.create(Interceptor);
-    logging_interceptor.* = Interceptor.init("logging", @import("interceptor.zig").loggingInterceptor);
+    logging_interceptor.* = Interceptor.init("logging", @import("features/interceptor.zig").loggingInterceptor);
     try interceptor_registry.addBeforeRequest(logging_interceptor);
     try interceptor_registry.addAfterResponse(logging_interceptor);
     try interceptor_registry.addOnError(logging_interceptor);
 
     const timing_interceptor = try allocator.create(Interceptor);
-    timing_interceptor.* = Interceptor.init("timing", @import("interceptor.zig").timingInterceptor);
+    timing_interceptor.* = Interceptor.init("timing", @import("features/interceptor.zig").timingInterceptor);
     try interceptor_registry.addBeforeRequest(timing_interceptor);
     try interceptor_registry.addAfterResponse(timing_interceptor);
     try interceptor_registry.addOnError(timing_interceptor);
 
     const size_interceptor = try allocator.create(Interceptor);
-    size_interceptor.* = Interceptor.init("size", @import("interceptor.zig").sizeInterceptor);
+    size_interceptor.* = Interceptor.init("size", @import("features/interceptor.zig").sizeInterceptor);
     try interceptor_registry.addBeforeRequest(size_interceptor);
     try interceptor_registry.addAfterResponse(size_interceptor);
 
@@ -215,7 +240,6 @@ fn initializeServerComponents(allocator: std.mem.Allocator, io: std.Io) !ServerC
         .rate_limiter = rate_limiter,
         .metrics = metrics,
         .logger = logger,
-        .session_manager = session_manager,
         .template = template,
         .structured_logger = structured_logger,
         .upload_tracker = upload_tracker,
@@ -249,7 +273,6 @@ fn deinitServerComponents(config: *ServerConfig) void {
     allocator.destroy(config.template);
     allocator.destroy(config.upload_tracker);
     allocator.destroy(config.structured_logger);
-    allocator.destroy(config.session_manager);
     allocator.destroy(config.prometheus_exporter);
 
     // Free interceptor objects first, then registry
@@ -267,31 +290,27 @@ fn deinitServerComponents(config: *ServerConfig) void {
 fn setupRoutes(allocator: std.mem.Allocator) !router {
     var route = try router.init(allocator);
 
-    try route.addRoute(http.Method.GET, "/", handlers.home);
-    try route.addRoute(http.Method.GET, "/api/health", handlers.health);
+    try route.addRoute(http.Method.GET, "/", handlers_home);
+    try route.addRoute(http.Method.GET, "/api/health", handlers_health);
 
     // API routes
-    try route.addRoute(http.Method.GET, "/api/data", handlers.api.handleData);
-    try route.addRoute(http.Method.POST, "/api/submit", handlers.api.handleSubmit);
-    try route.addRoute(http.Method.POST, "/api/upload", handlers.upload.handleUpload);
-    try route.addRoute(http.Method.GET, "/api/session", handlers.session.handleSession);
-    try route.addRoute(http.Method.GET, "/api/cookie", handlers.api.handleCookie);
-    try route.addRoute(http.Method.GET, "/api/template", handlers.api.handleTemplate);
-    try route.addRoute(http.Method.GET, "/api/compress", handlers.api.handleCompress);
-    try route.addRoute(http.Method.GET, "/api/metrics", handlers.api.handleMetrics);
-    try route.addRoute(http.Method.GET, "/api/client", handlers.api.handleClient);
-    try route.addRoute(http.Method.GET, "/api/secure", handlers.api.handleSecure);
-    try route.addRoute(http.Method.GET, "/api/benchmark", handlers.api.handleBenchmark);
-    try route.addRoute(http.Method.GET, "/api/tests", handlers.api.handleTests);
-    try route.addRoute(http.Method.GET, "/api/upload/progress", handlers.upload.handleUploadProgress);
-    try route.addRoute(http.Method.GET, "/api/log/demo", handlers.api.handleStructuredLog);
-    try route.addRoute(http.Method.GET, "/api/stream/sse", handlers.streaming.handleSSE);
-    try route.addRoute(http.Method.GET, "/api/stream/chunk", handlers.streaming.handleChunked);
-    try route.addRoute(http.Method.GET, "/metrics", handlers.api.handlePrometheus);
-    try route.addRoute(http.Method.GET, "/ws", handlers.websocket.testPageHandler);
+    try route.addRoute(http.Method.GET, "/api/data", handlers_api.handleData);
+    // try route.addRoute(http.Method.POST, "/api/submit", handlers_api.handleSubmit);
+    // try route.addRoute(http.Method.POST, "/api/upload", handlers_upload.handleUpload);
+    // try route.addRoute(http.Method.GET, "/api/cookie", handlers_api.handleCookie);
+    // try route.addRoute(http.Method.GET, "/api/template", handlers_api.handleTemplate);
+    // try route.addRoute(http.Method.GET, "/api/compress", handlers_api.handleCompress);
+    // try route.addRoute(http.Method.GET, "/api/metrics", handlers_api.handleMetrics);
+    // try route.addRoute(http.Method.GET, "/api/client", handlers_api.handleClient);
+    // try route.addRoute(http.Method.GET, "/api/secure", handlers_api.handleSecure);
+    // try route.addRoute(http.Method.GET, "/api/benchmark", handlers_api.handleBenchmark);
+    // try route.addRoute(http.Method.GET, "/api/tests", handlers_api.handleTests);
+    // try route.addRoute(http.Method.GET, "/api/upload/progress", handlers_upload.handleUploadProgress);
+    // try route.addRoute(http.Method.GET, "/api/log/demo", handlers_api.handleStructuredLog);
+    // try route.addRoute(http.Method.GET, "/metrics", handlers_api.handlePrometheus);
 
     // Static files route
-    try route.addRoute(http.Method.GET, "/static/*", handlers.static);
+    // try route.addRoute(http.Method.GET, "/static/*", handlers_static);
 
     return route;
 }

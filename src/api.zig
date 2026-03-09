@@ -1,8 +1,8 @@
 const std = @import("std");
 const http = std.http;
-const Context = @import("../core/context.zig").Context;
-const StructuredLogger = @import("../structured_log.zig").StructuredLogger;
-const PrometheusExporter = @import("../metrics_exporter.zig").PrometheusExporter;
+const Context = @import("core/context.zig").Context;
+const StructuredLogger = @import("features/structured_log.zig").StructuredLogger;
+const PrometheusExporter = @import("features/metrics_exporter.zig").PrometheusExporter;
 const globals = @import("globals.zig");
 
 /// Handle GET /api/data - return server information
@@ -82,7 +82,7 @@ pub fn handleCookie(ctx: *Context) !void {
 
 /// Handle GET /api/template - template rendering
 pub fn handleTemplate(ctx: *Context) !void {
-    const Template = @import("../template.zig").Template;
+    const Template = @import("features/template.zig").Template;
     const template_str = "Hello, {{name}}! Welcome to {{app}}.";
 
     var template = Template.init(ctx.allocator, template_str);
@@ -114,7 +114,7 @@ pub fn handleCompress(ctx: *Context) !void {
     }
     const data = buffer.items;
 
-    const GzipCompressor = @import("../compression.zig").GzipCompressor;
+    const GzipCompressor = @import("compression.zig").GzipCompressor;
     var compressor = GzipCompressor.init(ctx.allocator, .default);
     const compressed = try compressor.compress(data);
     defer ctx.allocator.free(compressed);
@@ -173,7 +173,7 @@ pub fn handleBenchmark(ctx: *Context) !void {
     ctx.response.setStatus(http.Status.ok);
     try ctx.response.setHeader("Content-Type", "application/json");
 
-    const benchmarkFn = @import("../benchmark.zig").benchmark;
+    const benchmarkFn = @import("benchmark.zig").benchmark;
 
     const result = try benchmarkFn("alloc_free", 1000, struct {
         fn run() anyerror!void {
@@ -202,7 +202,7 @@ pub fn handleTests(ctx: *Context) !void {
     var results = std.ArrayList(TestCase){};
     defer results.deinit(ctx.allocator);
 
-    const test_utils = @import("../test_utils.zig");
+    const test_utils = @import("test_utils.zig");
     const cases = [_]struct {
         name: []const u8,
         fn_ptr: *const fn () anyerror!void,

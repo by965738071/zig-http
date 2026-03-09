@@ -18,3 +18,6 @@ pub const websocket = @import("websocket.zig");
 
 // Static files handler
 pub const static = @import("static.zig").handleStatic;
+
+// Global state access
+pub const globals = @import("globals.zig");

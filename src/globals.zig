@@ -1,10 +1,10 @@
 /// Global state access for handlers
 /// This module provides access to global state that handlers need
 
-const StructuredLogger = @import("../structured_log.zig").StructuredLogger;
-const UploadTracker = @import("../upload_progress.zig").UploadTracker;
-const SessionManager = @import("../session.zig").SessionManager;
-const PrometheusExporter = @import("../metrics_exporter.zig").PrometheusExporter;
+const StructuredLogger = @import("features/structured_log.zig").StructuredLogger;
+const UploadTracker = @import("features/upload_progress.zig").UploadTracker;
+const SessionManager = @import("features/session.zig").SessionManager;
+const PrometheusExporter = @import("features/metrics_exporter.zig").PrometheusExporter;
 
 // Global state references (set in main)
 pub var g_structured_logger: ?*StructuredLogger = null;

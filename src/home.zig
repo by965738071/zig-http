@@ -1,6 +1,6 @@
 const std = @import("std");
 const http = std.http;
-const Context = @import("../core/context.zig").Context;
+const Context = @import("core/context.zig").Context;
 
 /// Handler for the home page - displays server demo interface
 pub fn handleHome(ctx: *Context) !void {

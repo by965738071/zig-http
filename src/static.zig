@@ -1,6 +1,6 @@
 const std = @import("std");
 const http = std.http;
-const Context = @import("../core/context.zig").Context;
+const Context = @import("core/context.zig").Context;
 
 /// Handle static file requests
 /// This handler is kept for compatibility but the static server

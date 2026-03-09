@@ -1,6 +1,6 @@
 const std = @import("std");
-const Middleware = @import("../middleware.zig").Middleware;
-const Context = @import("../context.zig").Context;
+const Middleware = @import("../../core/middleware.zig").Middleware;
+const Context = @import("../../core/context.zig").Context;
 const Io = std.Io;
 
 /// Distributed tracing middleware configuration
@@ -86,7 +86,7 @@ pub const TracingMiddleware = struct {
     fn generateSpanId(
         self: *TracingMiddleware,
     ) ![]const u8 {
-        const utils = @import("../utils.zig");
+        const utils = @import("utils");
         return utils.allocGenerateShortId(self.allocator, self.io);
     }
 

@@ -1,15 +1,15 @@
 const std = @import("std");
 const http = std.http;
-const StringInterner = @import("../zero_copy.zig").StringInterner;
+//const StringInterner = @import("../utils/zero_copy.zig").StringInterner;
 
 pub const Response = struct {
     allocator: std.mem.Allocator,
     status: http.Status = .ok,
     headers: std.StringHashMap([]const u8),
     body: std.ArrayList(u8),
-    string_interner: *StringInterner,
+    string_interner: *std.StringHashMap([]const u8),
 
-    pub fn init(allocator: std.mem.Allocator, string_interner: *StringInterner) !Response {
+    pub fn init(allocator: std.mem.Allocator, string_interner: *std.StringHashMap([]const u8)) !Response {
         return .{
             .allocator = allocator,
             .headers = std.StringHashMap([]const u8).init(allocator),
@@ -52,8 +52,8 @@ pub const Response = struct {
 
     pub fn setHeader(res: *Response, name: []const u8, value: []const u8) !void {
         // Use StringInterner to avoid duplicate allocations
-        const name_interned = try res.string_interner.intern(name);
-        const value_interned = try res.string_interner.intern(value);
+        const name_interned = res.string_interner.get(name) orelse return error.InvalidHeaderName;
+        const value_interned = res.string_interner.get(value) orelse return error.InvalidHeaderValue;
 
         if (res.headers.getPtr(name_interned)) |existing| {
             existing.* = value_interned;

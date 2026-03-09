@@ -1,6 +1,6 @@
 const std = @import("std");
-const Middleware = @import("../core/middleware.zig").Middleware;
-const Context = @import("../core/context.zig").Context;
+const Middleware = @import("../../core/middleware.zig").Middleware;
+const Context = @import("../../core/context.zig").Context;
 
 pub const XSSMiddleware = struct {
     middleware: Middleware,

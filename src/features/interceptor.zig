@@ -1,5 +1,5 @@
 const std = @import("std");
-const Context = @import("core/context.zig").Context;
+const Context = @import("../core/context.zig").Context;
 
 /// Interceptor trait
 pub const Interceptor = struct {
